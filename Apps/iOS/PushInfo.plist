@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>UIBackgroundModes</key><array><string>remote-notification</string></array>
+<key>APNSEnvironment</key><string>$(PUSH_ENVIRONMENT)</string>
+<key>NSFaceIDUsageDescription</key><string>使用面容 ID 解锁你们的私密空间。</string>
+<key>NSPhotoLibraryAddUsageDescription</key><string>将你选择的照片保存到本机相册。</string>
+</dict></plist>
