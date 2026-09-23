@@ -1408,6 +1408,7 @@ private struct PhotoBubble: View {
     let refresh: Date?
     let preview: (UIImage) -> Void
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var image: UIImage?
     @State private var jpeg: Data?
     @State private var saveStatus: String?
@@ -1418,7 +1419,8 @@ private struct PhotoBubble: View {
                 ZStack(alignment: .bottomTrailing) {
                     Group {
                         if kind == "image/gif", let jpeg {
-                            AnimatedStickerImage(data: jpeg)
+                            AnimatedStickerImage(data: jpeg, cacheKey: id.uuidString,
+                                                 animate: scenePhase == .active && !reduceMotion)
                                 .frame(width: 144, height: 144)
                         } else {
                             Image(uiImage: image).resizable().scaledToFit()
@@ -1464,6 +1466,30 @@ private struct PhotoBubble: View {
 
 private struct AnimatedStickerImage: UIViewRepresentable {
     let data: Data
+    let cacheKey: String
+    let animate: Bool
+
+    final class Animation: NSObject {
+        let frames: [UIImage]
+        let duration: TimeInterval
+        let cost: Int
+        init(frames: [UIImage], duration: TimeInterval, cost: Int) {
+            self.frames = frames; self.duration = duration; self.cost = cost
+        }
+    }
+    final class Coordinator {
+        var key: String?
+        var finish: DispatchWorkItem?
+        var generation = UUID()
+    }
+    private static let cache: NSCache<NSString, Animation> = {
+        let cache = NSCache<NSString, Animation>()
+        cache.countLimit = 24
+        cache.totalCostLimit = 64 * 1024 * 1024
+        return cache
+    }()
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
     func makeUIView(context: Context) -> UIImageView {
         let view = UIImageView()
         view.contentMode = .scaleAspectFit
@@ -1471,35 +1497,84 @@ private struct AnimatedStickerImage: UIViewRepresentable {
         return view
     }
     func updateUIView(_ view: UIImageView, context: Context) {
-        view.image = Self.decode(data)
-        view.startAnimating()
+        if !animate {
+            context.coordinator.finish?.cancel()
+            view.stopAnimating()
+            if let first = view.animationImages?.first { view.image = first }
+            view.animationImages = nil
+            return
+        }
+        guard context.coordinator.key != cacheKey else { return }
+        context.coordinator.key = cacheKey
+        context.coordinator.finish?.cancel()
+        view.stopAnimating(); view.animationImages = nil
+        view.image = UIImage(data: data)
+        let generation = UUID(); context.coordinator.generation = generation
+        if let cached = Self.cache.object(forKey: cacheKey as NSString) {
+            Self.play(cached, in: view, coordinator: context.coordinator, generation: generation)
+            return
+        }
+        let bytes = data
+        Task.detached(priority: .utility) {
+            guard let decoded = Self.decode(bytes) else { return }
+            await MainActor.run {
+                guard context.coordinator.generation == generation else { return }
+                Self.cache.setObject(decoded, forKey: cacheKey as NSString, cost: decoded.cost)
+                Self.play(decoded, in: view, coordinator: context.coordinator, generation: generation)
+            }
+        }
     }
-    private static func decode(_ data: Data) -> UIImage? {
-        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return UIImage(data: data) }
+    static func dismantleUIView(_ view: UIImageView, coordinator: Coordinator) {
+        coordinator.generation = UUID(); coordinator.finish?.cancel()
+        view.stopAnimating(); view.animationImages = nil; view.image = nil
+    }
+    @MainActor private static func play(_ animation: Animation, in view: UIImageView,
+                                        coordinator: Coordinator, generation: UUID) {
+        guard coordinator.generation == generation, !animation.frames.isEmpty else { return }
+        view.animationImages = animation.frames
+        view.animationDuration = animation.duration
+        view.animationRepeatCount = 1
+        view.image = animation.frames.last
+        view.startAnimating()
+        let finish = DispatchWorkItem { [weak view, weak coordinator] in
+            guard coordinator?.generation == generation else { return }
+            view?.stopAnimating(); view?.animationImages = nil
+            view?.image = animation.frames.last
+        }
+        coordinator.finish = finish
+        DispatchQueue.main.asyncAfter(deadline: .now() + animation.duration, execute: finish)
+    }
+    nonisolated private static func decode(_ data: Data) -> Animation? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let count = CGImageSourceGetCount(source)
-        guard count > 1 else { return UIImage(data: data) }
-        var frames: [UIImage] = [], duration = 0.0
+        guard count > 0 else { return nil }
+        var frames: [UIImage] = [], duration = 0.0, cost = 0
         for index in 0..<count {
             guard let cg = CGImageSourceCreateImageAtIndex(source, index, nil) else { continue }
             frames.append(UIImage(cgImage: cg))
+            cost += cg.width * cg.height * 4
             let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any]
             let gif = properties?[kCGImagePropertyGIFDictionary] as? [CFString: Any]
             duration += (gif?[kCGImagePropertyGIFUnclampedDelayTime] as? Double)
                 ?? (gif?[kCGImagePropertyGIFDelayTime] as? Double) ?? 0.1
         }
-        return UIImage.animatedImage(with: frames, duration: max(duration, 0.1))
+        guard !frames.isEmpty else { return nil }
+        return Animation(frames: frames, duration: max(duration, 0.1), cost: cost)
     }
 }
 
 private struct LocalStickerBubble: View {
     let sticker: InstalledSticker
     @State private var data: Data?
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         Group {
             if let data {
                 if sticker.record.mediaType == "image/gif" {
-                    AnimatedStickerImage(data: data)
+                    AnimatedStickerImage(data: data, cacheKey: sticker.id,
+                                         animate: scenePhase == .active && !reduceMotion)
                 } else if let image = UIImage(data: data) {
                     Image(uiImage: image).resizable().scaledToFit()
                 }
