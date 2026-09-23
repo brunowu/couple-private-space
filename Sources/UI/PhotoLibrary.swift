@@ -90,6 +90,7 @@ struct ProfileEditor: View {
     @State private var existingPhoto: UIImage?
     @State private var removedPhoto = false
     @State private var photoLoading = false
+    @State private var showingCamera = false
     @State private var saving = false
     @State private var failure: String?
 
@@ -108,8 +109,13 @@ struct ProfileEditor: View {
                         Image(uiImage: image).resizable().scaledToFill()
                             .frame(width: 112, height: 112).clipShape(Circle())
                     }
-                    PhotosPicker(selection: $selectedPhoto, matching: .images) {
-                        Label("选择头像照片", systemImage: "person.crop.circle.badge.plus")
+                    HStack(spacing: 20) {
+                        Button { showingCamera = true } label: { Label("拍照", systemImage: "camera") }
+                            .buttonStyle(.bordered)
+                        PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                            Label("从相册选择", systemImage: "photo.on.rectangle")
+                        }
+                        .buttonStyle(.bordered)
                     }
                     if importedPhoto != nil || (profile?.avatarID != nil && !removedPhoto) {
                         Button("移除头像", role: .destructive) {
@@ -132,6 +138,14 @@ struct ProfileEditor: View {
             }
         }
         .tint(SpaceStyle.accent).interactiveDismissDisabled(saving)
+        .sheet(isPresented: $showingCamera) {
+            CameraPicker { bytes in
+                do {
+                    importedPhoto = try PhotoImport.prepare(bytes)
+                    removedPhoto = false; failure = nil
+                } catch { failure = "无法使用这张照片，请重试。" }
+            }
+        }
         .onAppear {
             name = profile?.name ?? ""
             if let id = profile?.avatarID {

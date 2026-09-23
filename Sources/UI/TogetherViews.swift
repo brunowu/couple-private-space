@@ -25,7 +25,7 @@ struct CycleOverviewCard: View {
         return distance + 1
     }
     private var ovulationDay: Int? {
-        guard isOwner, let length, (21...35).contains(length) else { return nil }
+        guard let length, (21...35).contains(length) else { return nil }
         return length - 14
     }
 

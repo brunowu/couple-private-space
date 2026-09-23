@@ -34,10 +34,12 @@ def main():
     parser.add_argument("--endpoint", default="http://127.0.0.1:8787")
     parser.add_argument("--runtime", default="com.apple.CoreSimulator.SimRuntime.iOS-18-6")
     parser.add_argument("--app", default=str(ROOT / ".build/xcode-workspace/Build/Products/Debug-iphonesimulator/CouplePrivateSpace.app"))
+    parser.add_argument("--a-name", default="我们 · A")
+    parser.add_argument("--b-name", default="我们 · B")
     parser.add_argument("--capture-affection", action="store_true", help="Capture the normal receiver UI for visual inspection")
     options = parser.parse_args()
-    a = simulator("我们 · A", options.runtime)
-    b = simulator("我们 · B", options.runtime)
+    a = simulator(options.a_name, options.runtime)
+    b = simulator(options.b_name, options.runtime)
     print(f"A={a}\nB={b}", flush=True)
     containers = {}
     for device in [a, b]:
@@ -165,7 +167,9 @@ def main():
     step(a, "message")
     for device in [a, b]:
         command("xcrun", "simctl", "launch", "--terminate-running-process", device, BUNDLE)
-    time.sleep(12)
+    # Leave enough time for both the foreground pull and the encrypted delivery
+    # receipt.  Immediately terminating the receiver here can interrupt the receipt.
+    time.sleep(20)
     assert step(b, "status")["messages"] == before_auto + 1, "Foreground automatic sync failed"
     assert step(a, "status")["pending"] == 0, "Automatic encrypted receipt failed"
     if options.capture_affection:

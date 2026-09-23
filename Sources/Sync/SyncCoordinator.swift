@@ -51,16 +51,29 @@ public actor SyncCoordinator {
             return try createInTransaction(.media(manifest), objectID: objectID, now: now)
         }
     }
+    @discardableResult public func createSticker(_ data: Data, kind: String, width: Int, height: Int,
+                                                 objectID: UUID = UUID(), now: Date = Date()) throws -> DomainEvent {
+        let (manifest, sealed) = try prepareMedia(data, kind: kind, width: width, height: height,
+                                                  destination: .chat)
+        return try db.transaction {
+            guard try db.read("mediaBlobs", key: objectID.uuidString) == nil else { throw SpaceError.conflict }
+            try db.write("mediaBlobs", key: objectID.uuidString, value: sealed)
+            return try createInTransaction(.media(manifest), objectID: objectID, now: now)
+        }
+    }
     private func preparePhoto(_ jpeg: Data, width: Int, height: Int,
                               destination: MediaDestination?) throws -> (MediaManifest, Data) {
-        guard (1...2_000_000).contains(jpeg.count) else { throw SpaceError.capacity }
+        try prepareMedia(jpeg, kind: "image/jpeg", width: width, height: height, destination: destination)
+    }
+    private func prepareMedia(_ data: Data, kind: String, width: Int, height: Int,
+                              destination: MediaDestination?) throws -> (MediaManifest, Data) {
         let key = SymmetricKey(size: .bits256)
         let keyData = key.withUnsafeBytes { Data($0) }
-        let manifest = MediaManifest(byteCount: jpeg.count, width: width, height: height,
-                                     sha256: Data(SHA256.hash(data: jpeg)), fileKey: keyData,
-                                     destination: destination)
+        let manifest = MediaManifest(byteCount: data.count, width: width, height: height,
+                                     sha256: Data(SHA256.hash(data: data)), fileKey: keyData,
+                                     destination: destination, kind: kind)
         try manifest.validate()
-        guard let sealed = try AES.GCM.seal(jpeg, using: key).combined else { throw SpaceError.invalidEnvelope }
+        guard let sealed = try AES.GCM.seal(data, using: key).combined else { throw SpaceError.invalidEnvelope }
         return (manifest, sealed)
     }
     /// Commits the attachment and its owning memory/capsule in one local transaction.

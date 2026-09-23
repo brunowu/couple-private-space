@@ -5,6 +5,7 @@ import Domain
 import PhotosUI
 import QuickLook
 import UserNotifications
+import ImageIO
 
 enum SpaceStyle {
     static let accent = Color(uiColor: UIColor { traits in
@@ -96,6 +97,7 @@ public struct ProductSpaceView: View {
     let deliveries: [UUID: DeliveryState]
     let save: (EventPayload, UUID) async throws -> Void
     let savePhoto: (Data, Int, Int) async throws -> Void
+    let saveSticker: (Data, String, Int, Int) async throws -> Void
     let saveMemoryWithPhoto: (MemoryContent, Data, Int, Int, UUID) async throws -> Void
     let loadPhoto: (UUID) async throws -> Data?
     let updateProfile: (String, (jpeg: Data, width: Int, height: Int)?, UUID?) async throws -> Void
@@ -142,8 +144,21 @@ public struct ProductSpaceView: View {
     @State private var affectionStatus: String?
     @State private var tab = 0
     @State private var draft = ""
-    @State private var selectedChatPhoto: PhotosPickerItem?
+    @State private var selectedChatPhotos: [PhotosPickerItem] = []
+    @State private var showingChatCamera = false
+    @State private var showingStickerLibrary = false
+    @StateObject private var stickerLibrary = StickerLibrary()
+    @State private var stickerSmokeStarted = false
     @State private var photoSending = false
+    @State private var quotedMessage: Message?
+    @State private var selectingChat = false
+    @State private var selectedChatEntries: Set<UUID> = []
+    @State private var sharePayload: ChatSharePayload?
+    @State private var photoPreview: PhotoPreview?
+    @State private var chatVisibleLimit = 80
+    @State private var loadingEarlierChat = false
+    @AppStorage("chat-last-read-clock") private var chatLastReadClock = 0
+    @AppStorage("chat-read-clock-initialized") private var chatReadClockInitialized = false
     @State private var composing: Composer?
     @State private var selectedCapsule: UUID?
     @State private var selectedMemory: UUID?
@@ -177,6 +192,7 @@ public struct ProductSpaceView: View {
                 save: @escaping (EventPayload, UUID) async throws -> Void,
                 privateCycle: CycleEntry?, cycle: @escaping (CycleEntry) async throws -> Void,
                 savePhoto: @escaping (Data, Int, Int) async throws -> Void,
+                saveSticker: @escaping (Data, String, Int, Int) async throws -> Void,
                 saveMemoryWithPhoto: @escaping (MemoryContent, Data, Int, Int, UUID) async throws -> Void,
                 loadPhoto: @escaping (UUID) async throws -> Data?,
                 updateProfile: @escaping (String, (jpeg: Data, width: Int, height: Int)?, UUID?) async throws -> Void,
@@ -199,7 +215,8 @@ public struct ProductSpaceView: View {
         self.state = state; self.localID = localID; self.peerDeviceID = peerDeviceID
         self.pairingCode = pairingCode; self.showPairingFinal = showPairingFinal; self.isCycleOwner = isCycleOwner
         self.deliveries = deliveries; self.save = save; self.cycle = cycle
-        self.savePhoto = savePhoto; self.saveMemoryWithPhoto = saveMemoryWithPhoto; self.loadPhoto = loadPhoto
+        self.savePhoto = savePhoto; self.saveSticker = saveSticker
+        self.saveMemoryWithPhoto = saveMemoryWithPhoto; self.loadPhoto = loadPhoto
         self.updateProfile = updateProfile
         self.privateCycle = privateCycle
         self.configureReminders = configureReminders; self.reminderStatus = reminderStatus
@@ -223,6 +240,26 @@ public struct ProductSpaceView: View {
             NavigationStack {
                 chat.navigationTitle("我们").navigationBarTitleDisplayMode(.inline)
                     .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button(selectingChat ? "取消" : "选择") {
+                                selectingChat.toggle()
+                                if !selectingChat { selectedChatEntries.removeAll() }
+                            }
+                        }
+                        ToolbarItem(placement: .topBarTrailing) {
+                            if selectingChat {
+                                Button {
+                                    shareSelectedChat()
+                                } label: { Image(systemName: "square.and.arrow.up") }
+                                    .disabled(selectedChatEntries.isEmpty)
+                                    .accessibilityLabel("分享所选对话")
+                            } else {
+                                Button {
+                                    exportAllChat()
+                                } label: { Image(systemName: "square.and.arrow.up") }
+                                    .accessibilityLabel("导出全部对话记录")
+                            }
+                        }
                         ToolbarItemGroup(placement: .keyboard) {
                             Spacer()
                             Button("完成") { chatFocused = false }
@@ -230,7 +267,8 @@ public struct ProductSpaceView: View {
                         }
                     }
             }
-                .tabItem { Label("对话", systemImage: "bubble.left.and.bubble.right") }.tag(0)
+                .tabItem { Label("对话", systemImage: "bubble.left.and.bubble.right") }
+                .badge(unreadCount).tag(0)
             NavigationStack { wishes.navigationTitle("小小愿望").toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { composing = wishSection == 0 ? .wish : .checklist(nil, category) } label: { Image(systemName: "plus") }
@@ -251,7 +289,10 @@ public struct ProductSpaceView: View {
         }.tint(SpaceStyle.accent)
         .onChange(of: tab) { _, selected in
             chatFocused = false
-            if selected == 0 { Task { await clearRemoteNotifications(for: .message) } }
+            if selected == 0 {
+                markChatRead()
+                Task { await clearRemoteNotifications(for: .message) }
+            }
             if selected == 1 { Task { await clearRemoteNotifications(for: .wish) } }
         }
         .toolbarBackground(SpaceStyle.paper, for: .tabBar)
@@ -262,7 +303,7 @@ public struct ProductSpaceView: View {
                     Image(systemName: affection.kind.symbol).font(.title2).foregroundStyle(SpaceStyle.accent)
                     ProfileAvatar(name: peerName, photoID: peerAvatarID,
                                   load: loadPhoto, refresh: photoRefresh, size: 34)
-                    Text(affection.kind == .hug ? "\(peerName)给了你一个抱抱" : affection.kind == .missYou ? "\(peerName)想你了" : "\(peerName)想对你说：辛苦啦")
+                    Text(affectionText(affection.kind))
                         .font(.subheadline).accessibilityIdentifier("affection-received")
                     Spacer(minLength: 0)
                     Button("回应") { sendFeeling(affection.kind) }.font(.subheadline).tint(SpaceStyle.accent)
@@ -279,6 +320,20 @@ public struct ProductSpaceView: View {
             CapsuleEditor(draft: value, saveDraft: saveCapsuleDraft, discard: discardCapsuleDraft,
                           seal: sealCapsuleDraft)
         }
+        .sheet(item: $sharePayload) { payload in
+            ActivityShareSheet(items: payload.items)
+        }
+        .fullScreenCover(item: $photoPreview) { preview in
+            PhotoViewer(preview: preview, load: loadPhoto)
+        }
+        .sheet(isPresented: $showingChatCamera) {
+            CameraPicker { data in Task { await sendCapturedPhoto(data) } }
+        }
+        .sheet(isPresented: $showingStickerLibrary) {
+            StickerLibraryView(library: stickerLibrary) { sticker in
+                Task { await sendSticker(sticker) }
+            }
+        }
         .sheet(isPresented: $editingProfile) {
             ProfileEditor(profile: state.profiles[localID]?.value, loadPhoto: loadPhoto, save: updateProfile)
         }
@@ -292,62 +347,13 @@ public struct ProductSpaceView: View {
             if closed, let destination = notificationDestination { Task { await route(destination) } }
         }
         .sheet(isPresented: Binding(get: { selectedWish != nil }, set: { if !$0 { selectedWish = nil } })) {
-            NavigationStack {
-                if let id = selectedWish, let wish = state.wishes[id] {
-                    VStack(alignment: .leading, spacing: 20) {
-                        Text(wish.text).font(.title2)
-                        Text(statusTitle(wish.status)).foregroundStyle(.secondary)
-                    }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                        .navigationTitle("一个小小愿望")
-                        .toolbar { Button("完成") { selectedWish = nil } }
-                }
-            }
+            selectedWishSheet
         }
         .sheet(isPresented: Binding(get: { selectedMemory != nil }, set: { if !$0 { selectedMemory = nil } })) {
-            NavigationStack {
-                if let id = selectedMemory, let record = state.journal.memories[id], !record.value.deleted {
-                    ScrollView { VStack(alignment: .leading, spacing: 24) {
-                        Text(record.value.title).font(.largeTitle.bold())
-                        Text(record.value.date, style: .date).foregroundStyle(.secondary)
-                        if !record.value.text.isEmpty { Text(record.value.text).textSelection(.enabled) }
-                        if let mediaID = record.value.mediaID {
-                            PhotoBubble(id: mediaID, load: loadPhoto, refresh: photoRefresh)
-                        }
-                        if record.value.sourceID != nil { Label("留自两个人的日常", systemImage: "link").foregroundStyle(.secondary) }
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding(24) }
-                        .toolbar { Button("完成") { selectedMemory = nil } }
-                } else { ContentUnavailableView("这段回忆已移除", systemImage: "book.closed") }
-            }
+            selectedMemorySheet
         }
         .sheet(isPresented: Binding(get: { selectedCapsule != nil }, set: { if !$0 { selectedCapsule = nil } })) {
-            NavigationStack {
-                TimelineView(.periodic(from: .now, by: 1)) { context in
-                    if let id = selectedCapsule, let record = state.journal.capsules[id] {
-                        ScrollView { VStack(alignment: .leading, spacing: 24) {
-                            Label("写给这一刻", systemImage: "envelope.open").foregroundStyle(SpaceStyle.accent)
-                            Text(record.value.title).font(.largeTitle.bold())
-                            ForEach(state.journal.contributions(to: id)) { part in
-                                if state.journal.canOpen(part, now: context.date), openedCapsules.contains(part.id) {
-                                    Text("\(name(for: part.author))写下的").font(.caption).foregroundStyle(.secondary)
-                                    if !part.value.text.isEmpty {
-                                        Text(part.value.text).textSelection(.enabled).accessibilityIdentifier("capsule-content")
-                                    }
-                                    if let mediaID = part.value.mediaID {
-                                        PhotoBubble(id: mediaID, load: loadPhoto, refresh: photoRefresh)
-                                    }
-                                    Button("留作共同回忆") { rememberCapsule(part) }
-                                        .buttonStyle(.bordered)
-                                } else {
-                                    Label(state.journal.isCancelled(part) ? "这一份已取消封存" : "这一份尚未打开", systemImage: "lock").foregroundStyle(.secondary)
-                                }
-                            }
-                            if record.value.partnerSlotID != nil && state.journal.contributions(to: id).count == 1 {
-                                Text("另一份没有封存。已经到期的内容仍然可以阅读。").font(.footnote).foregroundStyle(.secondary)
-                            }
-                        }.frame(maxWidth: .infinity, alignment: .leading).padding(24) }
-                    } else { ContentUnavailableView("还未到开启时间", systemImage: "lock", description: Text("胶囊已取消或尚未到期。")) }
-                }.toolbar { Button("完成") { selectedCapsule = nil } }
-            }
+            selectedCapsuleSheet
         }
         .alert("未能完成", isPresented: Binding(get: { failure != nil }, set: { if !$0 { failure = nil } })) {
             Button("知道了") { failure = nil }
@@ -364,10 +370,94 @@ public struct ProductSpaceView: View {
         } message: {
             Text("解除后双方都不能再用这段配对同步。两台设备上已经保存的内容不会自动删除，也无法远程抹去伴侣的副本。")
         }
-        .onChange(of: selectedChatPhoto) { _, photo in
-            if let photo { Task { await sendSelectedPhoto(photo) } }
+        .onChange(of: selectedChatPhotos) { _, photos in
+            if !photos.isEmpty { Task { await sendSelectedPhotos(photos) } }
+        }
+        .onChange(of: chatLatestClock) { _, _ in if tab == 0 { markChatRead() } }
+        .onAppear {
+            if !chatReadClockInitialized {
+                chatLastReadClock = chatLatestClock; chatReadClockInitialized = true
+            } else if tab == 0 { markChatRead() }
+            #if DEBUG && targetEnvironment(simulator)
+            if !stickerSmokeStarted,
+               let index = ProcessInfo.processInfo.arguments.firstIndex(of: "--sticker-import-smoke"),
+               ProcessInfo.processInfo.arguments.indices.contains(index + 1) {
+                stickerSmokeStarted = true
+                stickerLibrary.importPack(URL(fileURLWithPath: ProcessInfo.processInfo.arguments[index + 1]))
+            }
+            #endif
         }
         .tint(SpaceStyle.accent)
+    }
+
+    @ViewBuilder private var selectedWishSheet: some View {
+        NavigationStack {
+            if let id = selectedWish, let wish = state.wishes[id] {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text(wish.text).font(.title2)
+                    Text(statusTitle(wish.status)).foregroundStyle(.secondary)
+                }
+                .padding(24)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .navigationTitle("一个小小愿望")
+                .toolbar { Button("完成") { selectedWish = nil } }
+            }
+        }
+    }
+
+    @ViewBuilder private var selectedMemorySheet: some View {
+        NavigationStack {
+            if let id = selectedMemory, let record = state.journal.memories[id], !record.value.deleted {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        Text(record.value.title).font(.largeTitle.bold())
+                        Text(record.value.date, style: .date).foregroundStyle(.secondary)
+                        if !record.value.text.isEmpty { Text(record.value.text).textSelection(.enabled) }
+                        if let mediaID = record.value.mediaID {
+                            PhotoBubble(id: mediaID, kind: "image/jpeg", load: loadPhoto, refresh: photoRefresh,
+                                        preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
+                        }
+                        if record.value.sourceID != nil { Label("留自两个人的日常", systemImage: "link").foregroundStyle(.secondary) }
+                    }.frame(maxWidth: .infinity, alignment: .leading).padding(24)
+                }.toolbar { Button("完成") { selectedMemory = nil } }
+            } else { ContentUnavailableView("这段回忆已移除", systemImage: "book.closed") }
+        }
+    }
+
+    @ViewBuilder private var selectedCapsuleSheet: some View {
+        NavigationStack {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                if let id = selectedCapsule, let record = state.journal.capsules[id] {
+                    let parts = state.journal.contributions(to: id)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 24) {
+                            Label("写给这一刻", systemImage: "envelope.open").foregroundStyle(SpaceStyle.accent)
+                            Text(record.value.title).font(.largeTitle.bold())
+                            ForEach(parts) { part in
+                                capsuleContribution(part, now: context.date)
+                            }
+                            if record.value.partnerSlotID != nil && parts.count == 1 {
+                                Text("另一份没有封存。已经到期的内容仍然可以阅读。").font(.footnote).foregroundStyle(.secondary)
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(24)
+                    }
+                } else { ContentUnavailableView("还未到开启时间", systemImage: "lock", description: Text("胶囊已取消或尚未到期。")) }
+            }.toolbar { Button("完成") { selectedCapsule = nil } }
+        }
+    }
+
+    @ViewBuilder private func capsuleContribution(_ part: JournalRecord<CapsuleContent>, now: Date) -> some View {
+        if state.journal.canOpen(part, now: now), openedCapsules.contains(part.id) {
+            Text("\(name(for: part.author))写下的").font(.caption).foregroundStyle(.secondary)
+            if !part.value.text.isEmpty { Text(part.value.text).textSelection(.enabled).accessibilityIdentifier("capsule-content") }
+            if let mediaID = part.value.mediaID {
+                PhotoBubble(id: mediaID, kind: "image/jpeg", load: loadPhoto, refresh: photoRefresh,
+                            preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
+            }
+            Button("留作共同回忆") { rememberCapsule(part) }.buttonStyle(.bordered)
+        } else {
+            Label(state.journal.isCancelled(part) ? "这一份已取消封存" : "这一份尚未打开", systemImage: "lock").foregroundStyle(.secondary)
+        }
     }
 
     private var chatEntries: [ChatEntry] {
@@ -376,18 +466,156 @@ public struct ProductSpaceView: View {
             .map { ChatEntry(id: $0.id, author: $0.author, version: $0.version, content: .photo($0)) }
         return (messages + photos).sorted { $0.version < $1.version }
     }
+    private var visibleChatEntries: [ChatEntry] {
+        Array(chatEntries.suffix(chatVisibleLimit))
+    }
+    private var chatPhotoIDs: [UUID] {
+        chatEntries.compactMap { entry in
+            if case .photo(let asset) = entry.content { return asset.id }
+            return nil
+        }
+    }
 
-    private func sendSelectedPhoto(_ selection: PhotosPickerItem) async {
-        photoSending = true
-        defer { photoSending = false; selectedChatPhoto = nil }
+    private var chatLatestClock: Int {
+        Int(min(UInt64(Int.max), chatEntries.map(\.version.clock).max() ?? 0))
+    }
+    private var unreadCount: Int {
+        guard chatReadClockInitialized else { return 0 }
+        return chatEntries.filter { $0.author != localID && $0.version.clock > UInt64(max(0, chatLastReadClock)) }.count
+    }
+    private func markChatRead() { chatLastReadClock = chatLatestClock }
+    private func entryCreatedAt(_ entry: ChatEntry) -> Date? {
+        switch entry.content { case .text(let value): value.createdAt; case .photo(let value): value.createdAt }
+    }
+    private func showsDateDivider(at index: Int, in entries: [ChatEntry]) -> Bool {
+        guard entries.indices.contains(index), let date = entryCreatedAt(entries[index]) else { return false }
+        guard index > 0, let previous = entryCreatedAt(entries[index - 1]) else { return true }
+        return !Calendar.current.isDate(date, inSameDayAs: previous)
+    }
+    private func dateDividerTitle(for entry: ChatEntry) -> String {
+        guard let date = entryCreatedAt(entry) else { return "" }
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) { return "今天" }
+        if calendar.isDateInYesterday(date) { return "昨天" }
+        if calendar.component(.year, from: date) == calendar.component(.year, from: Date()) {
+            return date.formatted(.dateTime.month(.wide).day())
+        }
+        return date.formatted(.dateTime.year().month(.wide).day())
+    }
+    private func chatExportText(for entries: [ChatEntry]) -> String {
+        let heading = "我们的对话\n导出时间：\(Date().formatted(date: .long, time: .shortened))\n\n"
+        return heading + entries.map { entry in
+            let time = entryCreatedAt(entry)?.formatted(date: .numeric, time: .shortened) ?? "时间未记录"
+            let content: String
+            switch entry.content {
+            case .text(let value): content = StickerReference.stickerID(from: value.text) == nil ? value.text : "[表情]"
+            case .photo: content = "[照片]"
+            }
+            return "[\(time)] \(name(for: entry.author))：\(content)"
+        }.joined(separator: "\n\n")
+    }
+    private func shareSelectedChat() {
+        let entries = chatEntries.filter { selectedChatEntries.contains($0.id) }
+        guard !entries.isEmpty else { return }
+        sharePayload = ChatSharePayload(items: [chatExportText(for: entries)])
+    }
+    private func exportAllChat() {
+        let text = chatExportText(for: chatEntries)
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("我们的对话.txt")
         do {
-            guard let bytes = try await selection.loadTransferable(type: Data.self) else { throw SpaceError.invalidInput }
+            try text.write(to: url, atomically: true, encoding: .utf8)
+            sharePayload = ChatSharePayload(items: [url])
+        } catch {
+            failure = "暂时无法生成对话文件，请重试。"
+        }
+    }
+    private func affectionText(_ kind: AffectionKind) -> String {
+        switch kind {
+        case .hug: "\(peerName)给了你一个抱抱"
+        case .missYou: "\(peerName)想你了"
+        case .kiss: "\(peerName)亲了你一下"
+        case .appreciation: "\(peerName)想对你说：辛苦啦"
+        }
+    }
+    private func scrollToLatest(_ proxy: ScrollViewProxy, animated: Bool) {
+        guard let id = chatEntries.last?.id else { return }
+        DispatchQueue.main.async {
+            if animated { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .bottom) } }
+            else { proxy.scrollTo(id, anchor: .bottom) }
+        }
+    }
+    @ViewBuilder private func messageBody(_ message: Message) -> some View {
+        if let stickerID = StickerReference.stickerID(from: message.text) {
+            if let sticker = stickerLibrary.sticker(id: stickerID) {
+                LocalStickerBubble(sticker: sticker)
+            } else {
+                Label("表情库正在准备或版本不一致", systemImage: "face.dashed")
+                    .font(.caption).foregroundStyle(.secondary).frame(width: 150, height: 100)
+            }
+        } else {
+            let pieces = message.text.components(separatedBy: "\n\n")
+            if let first = pieces.first, first.hasPrefix("> "), pieces.count > 1 {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(String(first.dropFirst(2))).font(.caption).foregroundStyle(.secondary)
+                        .padding(.leading, 8).overlay(alignment: .leading) { Capsule().fill(SpaceStyle.accent).frame(width: 3) }
+                    Text(pieces.dropFirst().joined(separator: "\n\n")).textSelection(.enabled)
+                }
+            } else {
+                Text(message.text).textSelection(.enabled)
+            }
+        }
+    }
+
+    private func sendSelectedPhotos(_ selections: [PhotosPickerItem]) async {
+        photoSending = true
+        defer { photoSending = false; selectedChatPhotos = [] }
+        for selection in selections {
+            do {
+                guard let bytes = try await selection.loadTransferable(type: Data.self) else { throw SpaceError.invalidInput }
+                let photo = try PhotoImport.prepare(bytes)
+                try await savePhoto(photo.jpeg, photo.width, photo.height)
+            } catch {
+                failure = error as? SpaceError == .capacity
+                    ? "其中一张照片处理后仍超过 2 MB，其他可读取照片已继续发送。"
+                    : "其中一张照片读取或保存失败，其他可读取照片已继续发送。"
+            }
+        }
+    }
+    private func sendCapturedPhoto(_ bytes: Data) async {
+        photoSending = true
+        defer { photoSending = false }
+        do {
             let photo = try PhotoImport.prepare(bytes)
             try await savePhoto(photo.jpeg, photo.width, photo.height)
         } catch {
-            failure = error as? SpaceError == .capacity
-                ? "照片处理后仍超过 2 MB，暂未保存。"
-                : "照片读取或保存失败，请重试。对方不会收到不完整的照片。"
+            failure = error as? SpaceError == .capacity ? "照片处理后仍超过 2 MB，请重试。" : "无法使用这张照片，请重试。"
+        }
+    }
+    private func sendSticker(_ sticker: InstalledSticker) async {
+        photoSending = true
+        defer { photoSending = false }
+        do {
+            if stickerLibrary.isSharedBuiltIn(sticker) {
+                guard let text = StickerReference.message(for: sticker.id) else { throw SpaceError.invalidInput }
+                try await save(.message(text: text), UUID())
+            } else {
+                // User-imported packs may differ between phones, so retain the full-media fallback.
+                let bytes = try Data(contentsOf: sticker.mediaURL, options: .mappedIfSafe)
+                try await saveSticker(bytes, sticker.record.mediaType, sticker.record.width, sticker.record.height)
+            }
+        } catch {
+            failure = "表情发送失败，请稍后重试。"
+        }
+    }
+    private func loadEarlierChat(using proxy: ScrollViewProxy, currentFirst: UUID?) {
+        guard !loadingEarlierChat, chatVisibleLimit < chatEntries.count else { return }
+        loadingEarlierChat = true
+        let anchor = currentFirst
+        Task { @MainActor in
+            chatVisibleLimit = min(chatEntries.count, chatVisibleLimit + 80)
+            await Task.yield()
+            if let anchor { proxy.scrollTo(anchor, anchor: .top) }
+            loadingEarlierChat = false
         }
     }
 
@@ -407,9 +635,29 @@ public struct ProductSpaceView: View {
             if chatEntries.isEmpty {
                 ContentUnavailableView("日常的小事，都放在这里", systemImage: "bubble.left.and.text.bubble.right", description: Text("只有你和伴侣的对话。"))
             } else {
+                let entries = visibleChatEntries
+                ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(spacing: 20) {
-                        ForEach(chatEntries) { entry in
+                        if chatEntries.count > entries.count {
+                            Button {
+                                loadEarlierChat(using: proxy, currentFirst: entries.first?.id)
+                            } label: {
+                                if loadingEarlierChat { ProgressView().controlSize(.small) }
+                                else { Label("加载更早消息", systemImage: "clock.arrow.circlepath") }
+                            }
+                            .font(.caption).foregroundStyle(.secondary).padding(.vertical, 8)
+                            .onAppear { loadEarlierChat(using: proxy, currentFirst: entries.first?.id) }
+                        }
+                        ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
+                            VStack(spacing: 12) {
+                            if showsDateDivider(at: index, in: entries) {
+                                Text(dateDividerTitle(for: entry))
+                                    .font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                                    .padding(.horizontal, 12).padding(.vertical, 5)
+                                    .background(SpaceStyle.softSurface, in: Capsule())
+                                    .frame(maxWidth: .infinity)
+                            }
                             HStack(alignment: .bottom, spacing: 10) {
                                 if entry.author == localID { Spacer(minLength: 36) }
                                 if entry.author != localID {
@@ -420,21 +668,37 @@ public struct ProductSpaceView: View {
                                     Text(name(for: entry.author)).font(.caption2).foregroundStyle(.secondary)
                                     switch entry.content {
                                     case .text(let message):
-                                        Text(message.text).textSelection(.enabled).padding(14)
+                                        messageBody(message).padding(14)
                                             .background(entry.author == localID ? SpaceStyle.accent.opacity(0.14) : card,
                                                         in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                                             .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
                                                 .strokeBorder(entry.author == localID ? SpaceStyle.accent.opacity(0.10) : SpaceStyle.border, lineWidth: 1))
                                             .contextMenu {
-                                                Button("加入共同回忆", systemImage: "bookmark") { remember(id: message.id, title: "收藏的对话", text: message.text, date: Date()) }
+                                                if StickerReference.stickerID(from: message.text) == nil {
+                                                    Button("复制", systemImage: "doc.on.doc") {
+                                                        UIPasteboard.general.string = message.text
+                                                    }
+                                                    Button("引用", systemImage: "quote.bubble") { quotedMessage = message; chatFocused = true }
+                                                    Button("加入共同回忆", systemImage: "bookmark") { remember(id: message.id, title: "收藏的对话", text: message.text, date: Date()) }
+                                                }
                                             }
                                     case .photo(let asset):
-                                        PhotoBubble(id: asset.id, load: loadPhoto, refresh: photoRefresh)
+                                        PhotoBubble(id: asset.id, kind: asset.manifest.kind,
+                                                    load: loadPhoto, refresh: photoRefresh,
+                                                    preview: {
+                                                        photoPreview = PhotoPreview(photoIDs: chatPhotoIDs,
+                                                                                    selectedID: asset.id,
+                                                                                    seedImage: $0)
+                                                    })
                                             .contextMenu {
                                                 Button("加入共同回忆", systemImage: "bookmark") {
                                                     rememberPhoto(asset.id)
                                                 }
                                             }
+                                    }
+                                    if let createdAt = entryCreatedAt(entry) {
+                                        Text(createdAt.formatted(date: .omitted, time: .shortened))
+                                            .font(.caption2).foregroundStyle(.tertiary)
                                     }
                                     if entry.author == localID {
                                         if case .photo = entry.content {
@@ -451,42 +715,95 @@ public struct ProductSpaceView: View {
                                 }
                                 if entry.author != localID { Spacer(minLength: 36) }
                             }
+                            }
+                            .padding(.leading, selectingChat ? 34 : 0)
+                            .overlay(alignment: .leading) {
+                                if selectingChat {
+                                    Image(systemName: selectedChatEntries.contains(entry.id) ? "checkmark.circle.fill" : "circle")
+                                        .font(.title3).foregroundStyle(selectedChatEntries.contains(entry.id) ? SpaceStyle.accent : .secondary)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                guard selectingChat else { return }
+                                if !selectedChatEntries.insert(entry.id).inserted { selectedChatEntries.remove(entry.id) }
+                            }
+                            .id(entry.id)
                         }
                     }.padding(20)
                 }.defaultScrollAnchor(.bottom).scrollDismissesKeyboard(.immediately)
+                    .onAppear { scrollToLatest(proxy, animated: false) }
+                    .onChange(of: chatEntries.last?.id) { _, _ in scrollToLatest(proxy, animated: true) }
+                    .onChange(of: chatFocused) { _, focused in if focused { scrollToLatest(proxy, animated: true) } }
+                }
             }
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 12) {
-                    ForEach(AffectionKind.allCases, id: \.self) { kind in
-                        Button { sendFeeling(kind) } label: {
-                            Label(kind.rawValue, systemImage: kind.symbol).font(.subheadline)
-                                .padding(.horizontal, 16).frame(minHeight: 44)
-                                .background(card, in: Capsule())
-                                .overlay(Capsule().strokeBorder(SpaceStyle.border, lineWidth: 1))
-                        }.accessibilityLabel(kind.rawValue)
-                    }
-                }.padding(.horizontal, 16)
-            }.padding(.top, 8)
+            HStack(spacing: 8) {
+                ForEach(AffectionKind.allCases, id: \.self) { kind in
+                    Button { sendFeeling(kind) } label: {
+                        VStack(spacing: 3) {
+                            Image(systemName: kind.symbol).font(.subheadline.weight(.semibold))
+                            Text(kind == .missYou ? "想你" : kind.rawValue)
+                                .font(.caption2).lineLimit(1).minimumScaleFactor(0.8)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 46)
+                        .background(card, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .strokeBorder(SpaceStyle.border, lineWidth: 1))
+                    }.buttonStyle(.plain).accessibilityLabel(kind.rawValue)
+                }
+            }.padding(.horizontal, 16).padding(.top, 8)
             if let affectionStatus { Text(affectionStatus).font(.caption).foregroundStyle(.secondary).padding(.top, 6) }
-            HStack(alignment: .bottom, spacing: 12) {
-                PhotosPicker(selection: $selectedChatPhoto, matching: .images) {
-                    Label("照片", systemImage: "photo").font(.subheadline)
-                        .frame(minWidth: 64, minHeight: 50)
-                }.disabled(photoSending).accessibilityLabel("选择照片").accessibilityIdentifier("chat-photo-picker")
-                TextField("想和你说…", text: $draft, axis: .vertical).focused($chatFocused).lineLimit(1...6)
-                    .padding(14).background(card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(SpaceStyle.border, lineWidth: 1))
-                    .accessibilityIdentifier("message-draft")
-                Button {
-                    let text = draft; sending = true
+            if let quotedMessage {
+                HStack(spacing: 10) {
+                    Image(systemName: "quote.bubble").foregroundStyle(SpaceStyle.accent)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("回复 \(name(for: quotedMessage.author))").font(.caption.weight(.semibold))
+                        Text(quotedMessage.text.replacingOccurrences(of: "\n", with: " ")).lineLimit(1).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button { self.quotedMessage = nil } label: { Image(systemName: "xmark.circle.fill") }
+                        .accessibilityLabel("取消引用")
+                }.padding(.horizontal, 18).padding(.top, 8)
+            }
+            VStack(spacing: 8) {
+                HStack(spacing: 22) {
+                    Button { showingStickerLibrary = true } label: {
+                        Label("表情", systemImage: "face.smiling")
+                    }.accessibilityLabel("表情库")
+                    Button { showingChatCamera = true } label: {
+                        Label("拍照", systemImage: "camera")
+                    }.disabled(photoSending).accessibilityLabel("拍照")
+                    PhotosPicker(selection: $selectedChatPhotos, maxSelectionCount: 9,
+                                 selectionBehavior: .ordered, matching: .images) {
+                        Label("相册", systemImage: "photo.on.rectangle")
+                    }.disabled(photoSending).accessibilityLabel("从相册选择").accessibilityIdentifier("chat-photo-picker")
+                    Spacer(minLength: 0)
+                }
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(SpaceStyle.accent)
+                .padding(.horizontal, 8)
+
+                HStack(alignment: .bottom, spacing: 10) {
+                    TextField("想和你说…", text: $draft, axis: .vertical).focused($chatFocused).lineLimit(1...6)
+                        .padding(14).background(card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(SpaceStyle.border, lineWidth: 1))
+                        .accessibilityIdentifier("message-draft")
+                    Button {
+                    let raw = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+                    let text = quotedMessage.map { message in
+                        let excerpt = message.text.replacingOccurrences(of: "\n", with: " ").prefix(120)
+                        return "> \(name(for: message.author))：\(excerpt)\n\n\(raw)"
+                    } ?? raw
+                    sending = true
                     Task {
-                        do { try await save(.message(text: text), UUID()); if draft == text { draft = "" }; chatFocused = false }
+                        do { try await save(.message(text: text), UUID()); draft = ""; quotedMessage = nil; chatFocused = false }
                         catch { failure = "内容未保存，请重试。输入仍保留。" }
                         sending = false
                     }
-                } label: { Image(systemName: "arrow.up").font(.headline).foregroundStyle(.white).frame(width: 46, height: 46).background(SpaceStyle.accent, in: Circle()) }
-                    .disabled(sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("发送")
-                    .opacity(sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
+                    } label: { Image(systemName: "arrow.up").font(.headline).foregroundStyle(.white).frame(width: 46, height: 46).background(SpaceStyle.accent, in: Circle()) }
+                        .disabled(sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("发送")
+                        .opacity(sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
+                }
             }.padding(16)
         }.background(paper)
     }
@@ -545,7 +862,13 @@ public struct ProductSpaceView: View {
                                 var value = record.value; value.completed.toggle(); submit(.journal(.checklist(value)), id: record.id)
                             } label: { Image(systemName: record.value.completed ? "checkmark.circle.fill" : "circle").font(.title2).foregroundStyle(SpaceStyle.sage).frame(minWidth: 44, minHeight: 44) }
                                 .accessibilityLabel(record.value.completed ? "恢复未完成：\(record.value.text)" : "完成：\(record.value.text)")
-                            Text(record.value.text).strikethrough(record.value.completed).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 10)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(record.value.text).strikethrough(record.value.completed)
+                                if let dueAt = record.value.dueAt {
+                                    Label(dueAt.formatted(date: .abbreviated, time: .shortened), systemImage: "clock")
+                                        .font(.caption).foregroundStyle(dueAt < Date() && !record.value.completed ? SpaceStyle.accent : .secondary)
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 10)
                             Menu {
                                 Button("编辑") { composing = .checklist(record, category) }
                                 if record.value.completed { Button("留作回忆") { remember(id: record.id, title: record.value.text, text: "一起完成的一件小事。", date: Date()) } }
@@ -578,7 +901,8 @@ public struct ProductSpaceView: View {
                                 }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                             }.buttonStyle(.plain)
                             if let mediaID = record.value.mediaID {
-                                PhotoBubble(id: mediaID, load: loadPhoto, refresh: photoRefresh)
+                                PhotoBubble(id: mediaID, kind: "image/jpeg", load: loadPhoto, refresh: photoRefresh,
+                                            preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
                             }
                             Menu("整理回忆") {
                                 Button("编辑") { composing = .memory(record) }
@@ -875,6 +1199,7 @@ public struct ProductSpaceView: View {
             $0.request.trigger is UNPushNotificationTrigger &&
             $0.request.content.userInfo["destination"] as? String == kind.rawValue
         }.map(\.request.identifier))
+        try? await center.setBadgeCount(0)
     }
     private func sendFeeling(_ kind: AffectionKind) {
         Task {
@@ -947,12 +1272,15 @@ private struct ContentComposer: View {
     @State private var text = ""
     @State private var date = Date().addingTimeInterval(86_400)
     @State private var category: ListCategory = .eat
+    @State private var hasDueDate = false
+    @State private var dueAt = Date().addingTimeInterval(3_600)
     @State private var saving = false
     @State private var error: String?
     @State private var objectID = UUID()
     @State private var selectedMemoryPhoto: PhotosPickerItem?
     @State private var importedPhoto: (jpeg: Data, width: Int, height: Int)?
     @State private var photoLoading = false
+    @State private var showingCamera = false
     private var needsTitle: Bool { switch item { case .memory: true; default: false } }
     private var allowsEmptyText: Bool {
         if case .memory(let record) = item { return importedPhoto != nil || record?.value.mediaID != nil }
@@ -965,7 +1293,11 @@ private struct ContentComposer: View {
                 Section(needsTitle ? "想留下的话（可选）" : "内容") {
                     TextEditor(text: $text).frame(minHeight: 160).accessibilityIdentifier("content-body")
                 }
-                if case .checklist = item { Picker("分类", selection: $category) { ForEach(ListCategory.allCases, id: \.self) { Text($0.rawValue).tag($0) } } }
+                if case .checklist = item {
+                    Picker("分类", selection: $category) { ForEach(ListCategory.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
+                    Toggle("设置时间", isOn: $hasDueDate)
+                    if hasDueDate { DatePicker("提醒时间", selection: $dueAt) }
+                }
                 if case .memory = item { DatePicker("这一天", selection: $date, displayedComponents: .date) }
                 if case .memory(let record) = item {
                     Section("照片（可选）") {
@@ -973,8 +1305,13 @@ private struct ContentComposer: View {
                             Label("已附有照片，编辑会保留原照片", systemImage: "photo")
                                 .foregroundStyle(.secondary)
                         } else {
-                            PhotosPicker(selection: $selectedMemoryPhoto, matching: .images) {
-                                Label("选择照片", systemImage: "photo.badge.plus")
+                            HStack(spacing: 20) {
+                                Button { showingCamera = true } label: { Label("拍照", systemImage: "camera") }
+                                    .buttonStyle(.bordered)
+                                PhotosPicker(selection: $selectedMemoryPhoto, matching: .images) {
+                                    Label("从相册选择", systemImage: "photo.on.rectangle")
+                                }
+                                .buttonStyle(.bordered)
                             }
                             if let importedPhoto, let image = UIImage(data: importedPhoto.jpeg) {
                                 Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 180)
@@ -993,10 +1330,17 @@ private struct ContentComposer: View {
                     ToolbarItem(placement: .confirmationAction) { Button("保存") { persist() }.disabled(saving || photoLoading || (!allowsEmptyText && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)) }
                 }
         }.tint(SpaceStyle.accent).interactiveDismissDisabled(saving)
+            .sheet(isPresented: $showingCamera) {
+                CameraPicker { bytes in
+                    do { importedPhoto = try PhotoImport.prepare(bytes); error = nil }
+                    catch { self.error = "无法使用这张照片，请重试。" }
+                }
+            }
             .onAppear {
                 switch item {
                 case .checklist(let record, let selected):
                     category = record?.value.category ?? selected; text = record?.value.text ?? ""; objectID = record?.id ?? objectID
+                    hasDueDate = record?.value.dueAt != nil; dueAt = record?.value.dueAt ?? Date().addingTimeInterval(3_600)
                 case .memory(let record):
                     title = record?.value.title ?? ""; text = record?.value.text ?? ""; date = record?.value.date ?? Date(); objectID = record?.id ?? objectID
                 default: break
@@ -1027,7 +1371,10 @@ private struct ContentComposer: View {
         var photoMemory: MemoryContent?
         switch item {
         case .wish: payload = .wishCreated(text: text)
-        case .checklist(let record, _): payload = .journal(.checklist(ChecklistContent(text: text, category: category, completed: record?.value.completed ?? false)))
+        case .checklist(let record, _):
+            payload = .journal(.checklist(ChecklistContent(text: text, category: category,
+                completed: record?.value.completed ?? false, deleted: record?.value.deleted ?? false,
+                dueAt: hasDueDate ? dueAt : nil)))
         case .memory(let record):
             let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
             let memory = MemoryContent(title: name.isEmpty ? (text.isEmpty ? "一起留下的照片" : "一起留下的一段话") : name,
@@ -1054,26 +1401,29 @@ private struct ContentComposer: View {
 }
 private struct PhotoBubble: View {
     let id: UUID
+    let kind: String
     let load: (UUID) async throws -> Data?
     let refresh: Date?
+    let preview: (UIImage) -> Void
     @Environment(\.scenePhase) private var scenePhase
     @State private var image: UIImage?
     @State private var jpeg: Data?
-    @State private var previewURL: URL?
     @State private var saveStatus: String?
 
     var body: some View {
         Group {
             if let image {
                 ZStack(alignment: .bottomTrailing) {
-                    Image(uiImage: image).resizable().scaledToFit()
+                    Group {
+                        if kind == "image/gif", let jpeg {
+                            AnimatedStickerImage(data: jpeg)
+                        } else {
+                            Image(uiImage: image).resizable().scaledToFit()
+                        }
+                    }
                         .frame(maxWidth: 240, maxHeight: 280)
                         .clipShape(RoundedRectangle(cornerRadius: 18))
-                        .onTapGesture {
-                            guard let jpeg else { return }
-                            do { previewURL = try PrivatePhotoLibrary.temporaryJPEG(jpeg) }
-                            catch { saveStatus = "无法打开照片预览。" }
-                        }
+                        .onTapGesture { preview(image) }
                         .accessibilityLabel("打开照片预览")
                     Button {
                         guard let jpeg else { return }
@@ -1097,18 +1447,211 @@ private struct PhotoBubble: View {
             }
         }
         .task(id: "\(scenePhase)-\(refresh?.timeIntervalSince1970 ?? 0)") {
-            guard scenePhase == .active else { image = nil; jpeg = nil; return }
+            // Rotation and system overlays can briefly make the scene inactive. Keep the
+            // decoded photo alive so an open full-screen viewer is not torn down.
+            guard scenePhase == .active else { return }
             jpeg = try? await load(id)
             image = jpeg.flatMap(UIImage.init(data:))
         }
-        .quickLookPreview($previewURL)
-        .onChange(of: previewURL) { old, new in
-            if new == nil, let old { PrivatePhotoLibrary.removeTemporary(old) }
-        }
-        .onDisappear { if let previewURL { PrivatePhotoLibrary.removeTemporary(previewURL) } }
         .alert("照片", isPresented: Binding(get: { saveStatus != nil }, set: { if !$0 { saveStatus = nil } })) {
             Button("好") { saveStatus = nil }
         } message: { Text(saveStatus ?? "") }
     }
+}
+
+private struct AnimatedStickerImage: UIViewRepresentable {
+    let data: Data
+    func makeUIView(context: Context) -> UIImageView {
+        let view = UIImageView()
+        view.contentMode = .scaleAspectFit
+        view.clipsToBounds = true
+        return view
+    }
+    func updateUIView(_ view: UIImageView, context: Context) {
+        view.image = Self.decode(data)
+        view.startAnimating()
+    }
+    private static func decode(_ data: Data) -> UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return UIImage(data: data) }
+        let count = CGImageSourceGetCount(source)
+        guard count > 1 else { return UIImage(data: data) }
+        var frames: [UIImage] = [], duration = 0.0
+        for index in 0..<count {
+            guard let cg = CGImageSourceCreateImageAtIndex(source, index, nil) else { continue }
+            frames.append(UIImage(cgImage: cg))
+            let properties = CGImageSourceCopyPropertiesAtIndex(source, index, nil) as? [CFString: Any]
+            let gif = properties?[kCGImagePropertyGIFDictionary] as? [CFString: Any]
+            duration += (gif?[kCGImagePropertyGIFUnclampedDelayTime] as? Double)
+                ?? (gif?[kCGImagePropertyGIFDelayTime] as? Double) ?? 0.1
+        }
+        return UIImage.animatedImage(with: frames, duration: max(duration, 0.1))
+    }
+}
+
+private struct LocalStickerBubble: View {
+    let sticker: InstalledSticker
+    @State private var data: Data?
+
+    var body: some View {
+        Group {
+            if let data {
+                if sticker.record.mediaType == "image/gif" {
+                    AnimatedStickerImage(data: data)
+                } else if let image = UIImage(data: data) {
+                    Image(uiImage: image).resizable().scaledToFit()
+                }
+            } else {
+                ProgressView().controlSize(.small)
+            }
+        }
+        .frame(width: 160, height: 160)
+        .task(id: sticker.id) {
+            data = try? Data(contentsOf: sticker.mediaURL, options: .mappedIfSafe)
+        }
+        .accessibilityLabel("表情")
+    }
+}
+
+private struct PhotoPreview: Identifiable {
+    let id = UUID()
+    let photoIDs: [UUID]
+    let selectedID: UUID
+    let seedImage: UIImage
+}
+
+private struct PhotoViewer: View {
+    let preview: PhotoPreview
+    let load: (UUID) async throws -> Data?
+    @Environment(\.dismiss) private var dismiss
+    @State private var selectedID: UUID
+    @State private var quarterTurns: [UUID: Int] = [:]
+
+    init(preview: PhotoPreview, load: @escaping (UUID) async throws -> Data?) {
+        self.preview = preview
+        self.load = load
+        _selectedID = State(initialValue: preview.selectedID)
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            TabView(selection: $selectedID) {
+                ForEach(preview.photoIDs, id: \.self) { photoID in
+                    GalleryPhotoPage(
+                        id: photoID,
+                        seedImage: photoID == preview.selectedID ? preview.seedImage : nil,
+                        quarterTurns: quarterTurns[photoID, default: 0],
+                        load: load
+                    )
+                    .tag(photoID)
+                }
+            }
+            .tabViewStyle(.page(indexDisplayMode: .never))
+            .padding(.vertical, 70)
+            VStack {
+                HStack {
+                    Button("关闭") { dismiss() }
+                    Spacer()
+                    Button { quarterTurns[selectedID] = (quarterTurns[selectedID, default: 0] + 3) % 4 } label: { Image(systemName: "rotate.left") }
+                        .accessibilityLabel("向左旋转")
+                    Button { quarterTurns[selectedID] = (quarterTurns[selectedID, default: 0] + 1) % 4 } label: { Image(systemName: "rotate.right") }
+                        .accessibilityLabel("向右旋转")
+                }.font(.headline).foregroundStyle(.white).padding()
+                Spacer()
+                VStack(spacing: 5) {
+                    if preview.photoIDs.count > 1 {
+                        Text("\((preview.photoIDs.firstIndex(of: selectedID) ?? 0) + 1) / \(preview.photoIDs.count)")
+                    }
+                    Text(preview.photoIDs.count > 1 ? "左右滑动 · 双击或双指缩放" : "双击缩放 · 双指捏合查看")
+                }
+                .font(.caption).foregroundStyle(.white.opacity(0.72)).padding()
+            }
+        }.preferredColorScheme(.dark)
+    }
+}
+
+private struct GalleryPhotoPage: View {
+    let id: UUID
+    let seedImage: UIImage?
+    let quarterTurns: Int
+    let load: (UUID) async throws -> Data?
+    @State private var image: UIImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                ZoomableImage(image: image.rotated(quarterTurns: quarterTurns))
+                    .id(quarterTurns)
+            } else {
+                ProgressView("加载照片…").tint(.white).foregroundStyle(.white)
+            }
+        }
+        .task(id: id) {
+            if image == nil { image = seedImage }
+            if image == nil, let data = try? await load(id) { image = UIImage(data: data) }
+        }
+    }
+}
+
+private struct ZoomableImage: UIViewRepresentable {
+    let image: UIImage
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeUIView(context: Context) -> UIScrollView {
+        let scroll = UIScrollView()
+        scroll.delegate = context.coordinator; scroll.minimumZoomScale = 1; scroll.maximumZoomScale = 6
+        scroll.showsHorizontalScrollIndicator = false; scroll.showsVerticalScrollIndicator = false
+        let view = context.coordinator.imageView
+        view.translatesAutoresizingMaskIntoConstraints = false; view.contentMode = .scaleAspectFit
+        scroll.addSubview(view)
+        NSLayoutConstraint.activate([
+            view.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
+            view.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
+            view.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),
+            view.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
+            view.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor),
+            view.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor)
+        ])
+        let doubleTap = UITapGestureRecognizer(target: context.coordinator, action: #selector(Coordinator.doubleTap(_:)))
+        doubleTap.numberOfTapsRequired = 2; scroll.addGestureRecognizer(doubleTap); context.coordinator.scroll = scroll
+        return scroll
+    }
+    func updateUIView(_ scroll: UIScrollView, context: Context) { context.coordinator.imageView.image = image }
+    final class Coordinator: NSObject, UIScrollViewDelegate {
+        let imageView = UIImageView(); weak var scroll: UIScrollView?
+        func viewForZooming(in scrollView: UIScrollView) -> UIView? { imageView }
+        @objc func doubleTap(_ gesture: UITapGestureRecognizer) {
+            guard let scroll else { return }
+            scroll.setZoomScale(scroll.zoomScale > 1 ? 1 : 2.5, animated: true)
+        }
+    }
+}
+
+private extension UIImage {
+    func rotated(quarterTurns: Int) -> UIImage {
+        let turns = ((quarterTurns % 4) + 4) % 4
+        guard turns != 0 else { return self }
+        let swapped = turns % 2 == 1
+        let size = swapped ? CGSize(width: self.size.height, height: self.size.width) : self.size
+        return UIGraphicsImageRenderer(size: size).image { context in
+            let cg = context.cgContext
+            cg.translateBy(x: size.width / 2, y: size.height / 2)
+            cg.rotate(by: CGFloat(turns) * .pi / 2)
+            draw(in: CGRect(x: -self.size.width / 2, y: -self.size.height / 2,
+                            width: self.size.width, height: self.size.height))
+        }
+    }
+}
+
+private struct ChatSharePayload: Identifiable {
+    let id = UUID()
+    let items: [Any]
+}
+
+private struct ActivityShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
 }
 #endif

@@ -52,7 +52,9 @@ import Vision
         do {
             if client == nil {
                 let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("NetworkSpace")
-                client = try NetworkPair(directory: directory, vault: KeychainVault(service: "private.couple.network"))
+                // v2 intentionally starts a fresh cryptographic identity after the
+                // 2026-09 clean reinstall; iOS retains old Keychain items after uninstall.
+                client = try NetworkPair(directory: directory, vault: KeychainVault(service: "private.couple.network.v2"))
             }
             await refresh()
             #if DEBUG && targetEnvironment(simulator)
@@ -64,7 +66,7 @@ import Vision
                 try await save(.journal(.sealCapsule(CapsuleContent(title: "到期提醒验收", text: "到时才看得到的心里话", opensAt: Date().addingTimeInterval(20)))), objectID: UUID())
             }
             if ProcessInfo.processInfo.arguments.contains("--affection-notification-ui-test"), stage == "paired", let client {
-                _ = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+                _ = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
                 guard let id = try await client.latestAffectionActionID() else { throw SpaceError.missingRecord }
                 let content = UNMutableNotificationContent()
                 content.title = "我们"; content.body = "你收到了一份小心意"; content.categoryIdentifier = "PRIVATE_AFFECTION"
@@ -74,7 +76,7 @@ import Vision
                 pushStatus = "模拟通知已安排。"
             }
             if ProcessInfo.processInfo.arguments.contains("--wish-notification-ui-test"), stage == "paired" {
-                _ = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+                _ = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
                 guard let wish = state.wishes.values.first(where: {
                     $0.creator != localID && $0.status == .active && $0.text.hasPrefix("周末一起吃早餐 · ")
                 }) else { throw SpaceError.missingRecord }
@@ -85,7 +87,7 @@ import Vision
                     trigger: UNTimeIntervalNotificationTrigger(timeInterval: 12, repeats: false)))
             }
             if ProcessInfo.processInfo.arguments.contains("--message-notification-ui-test"), stage == "paired" {
-                _ = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+                _ = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
                 let content = UNMutableNotificationContent()
                 content.title = "我们"; content.body = "你有一条新消息"
                 content.userInfo = ["destination": "message"]
@@ -149,6 +151,12 @@ import Vision
         await refresh()
         Task { await self.sync() }
     }
+    func saveSticker(_ data: Data, kind: String, width: Int, height: Int) async throws {
+        guard let client else { throw SpaceError.notPaired }
+        try await client.createSticker(data, kind: kind, width: width, height: height)
+        await refresh()
+        Task { await self.sync() }
+    }
     func saveMemoryWithPhoto(_ memory: MemoryContent, jpeg: Data,
                              width: Int, height: Int, id: UUID) async throws {
         guard let client else { throw SpaceError.notPaired }
@@ -179,7 +187,7 @@ import Vision
         UserDefaults.standard.set(wishes, forKey: "wish-push-enabled")
         registeredPush = nil
         if affection || messages || wishes {
-            let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+            let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
             guard granted else { pushStatus = "系统通知未授权，可在系统设置中开启。"; return }
             UIApplication.shared.registerForRemoteNotifications()
         }
@@ -195,7 +203,7 @@ import Vision
         let settings = await UNUserNotificationCenter.current().notificationSettings()
         let authorized: Bool
         if enabled && settings.authorizationStatus == .notDetermined {
-            authorized = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])) == true
+            authorized = (try? await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])) == true
         } else {
             authorized = settings.authorizationStatus == .authorized || settings.authorizationStatus == .provisional
         }
@@ -275,14 +283,14 @@ import Vision
     }
     func configureCapsuleReminders(_ enabled: Bool) async throws {
         UserDefaults.standard.set(enabled, forKey: "capsule-reminders-enabled")
-        if enabled { _ = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
+        if enabled { _ = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) }
         await reconcileCapsuleReminders()
     }
     func configureAnniversaryReminders(enabled: Bool, daysBefore: Int) async throws {
         guard [0, 1, 3, 7].contains(daysBefore) else { throw SpaceError.invalidInput }
         UserDefaults.standard.set(enabled, forKey: "anniversary-reminders-enabled")
         UserDefaults.standard.set(daysBefore, forKey: "anniversary-reminder-days")
-        if enabled { _ = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) }
+        if enabled { _ = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) }
         await reconcileAnniversaryReminders()
         await reconcileCapsuleReminders()
     }
@@ -336,7 +344,7 @@ import Vision
         UserDefaults.standard.set(enabled, forKey: "wish-reminders-enabled")
         UserDefaults.standard.set(days, forKey: "wish-reminder-days")
         if enabled {
-            let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound])
+            let granted = try await UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge])
             if !granted { reminderStatus = "系统通知未授权。你仍然可以正常查看愿望，可前往系统设置允许通知。" }
         }
         await reconcileReminders()
@@ -588,7 +596,8 @@ public struct NetworkSpaceView: View {
                     syncStatus: !model.online ? "离线 · 内容保存在本机" : model.error != nil ? "暂未连接 · 等待重试" : model.lastSync == nil ? "等待同步" : "已连接 · 待回执 \(model.pending)",
                     photoRefresh: model.lastSync,
                     save: { try await model.save($0, objectID: $1) }, privateCycle: model.privateCycle, cycle: model.cycle,
-                    savePhoto: model.savePhoto, saveMemoryWithPhoto: model.saveMemoryWithPhoto,
+                    savePhoto: model.savePhoto, saveSticker: model.saveSticker,
+                    saveMemoryWithPhoto: model.saveMemoryWithPhoto,
                     loadPhoto: model.photoData,
                     updateProfile: model.updateProfile,
                     configureReminders: { try await model.configureReminders(enabled: $0, days: $1, quiet: $2) }, retry: model.sync,

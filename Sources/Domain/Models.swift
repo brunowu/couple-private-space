@@ -113,13 +113,15 @@ public struct MediaManifest: Codable, Equatable, Sendable {
     /// Nil is a legacy chat photo. New attachments name their owning surface.
     public let destination: MediaDestination?
     public init(byteCount: Int, width: Int, height: Int, sha256: Data, fileKey: Data,
-                destination: MediaDestination? = nil) {
-        self.kind = "image/jpeg"; self.byteCount = byteCount
+                destination: MediaDestination? = nil, kind: String = "image/jpeg") {
+        self.kind = kind; self.byteCount = byteCount
         self.width = width; self.height = height; self.sha256 = sha256; self.fileKey = fileKey
         self.destination = destination
     }
     public func validate() throws {
-        guard kind == "image/jpeg", (1...2_000_000).contains(byteCount),
+        let maximum = kind == "image/jpeg" ? 2_000_000 : 10 * 1024 * 1024
+        guard ["image/jpeg", "image/png", "image/gif"].contains(kind),
+              (1...maximum).contains(byteCount),
               (1...4_096).contains(width), (1...4_096).contains(height),
               sha256.count == 32, fileKey.count == 32 else { throw SpaceError.invalidInput }
     }
@@ -130,7 +132,13 @@ public struct MediaAsset: Codable, Equatable, Sendable, Identifiable {
     public let author: UUID
     public let manifest: MediaManifest
     public let version: Version
+    public let createdAt: Date?
     public var destination: MediaDestination { manifest.destination ?? .chat }
+    public init(id: UUID, author: UUID, manifest: MediaManifest, version: Version,
+                createdAt: Date? = nil) {
+        self.id = id; self.author = author; self.manifest = manifest
+        self.version = version; self.createdAt = createdAt
+    }
 }
 
 public struct DomainEvent: Codable, Equatable, Sendable {
@@ -204,6 +212,12 @@ public struct Message: Codable, Equatable, Sendable {
     public let author: UUID
     public let text: String
     public let version: Version
+    /// Nil only for materialized views written by versions before message timestamps.
+    public let createdAt: Date?
+    public init(id: UUID, author: UUID, text: String, version: Version, createdAt: Date? = nil) {
+        self.id = id; self.author = author; self.text = text
+        self.version = version; self.createdAt = createdAt
+    }
 }
 public struct Wish: Codable, Equatable, Sendable {
     public let id: UUID
@@ -240,13 +254,15 @@ public struct SharedState: Codable, Equatable, Sendable {
             profileStorage = values
         case .media(let manifest):
             var assets = media
-            let value = MediaAsset(id: event.objectID, author: event.author, manifest: manifest, version: event.version)
+            let value = MediaAsset(id: event.objectID, author: event.author, manifest: manifest,
+                                   version: event.version, createdAt: event.createdAt)
             if let old = assets[value.id], old != value { throw SpaceError.conflict }
             assets[value.id] = value; mediaStorage = assets
         case .journal(let operation):
             var value = journal; try value.apply(operation, event: event); journalStorage = value
         case .message(let text):
-            let value = Message(id: event.objectID, author: event.author, text: text, version: event.version)
+            let value = Message(id: event.objectID, author: event.author, text: text,
+                                version: event.version, createdAt: event.createdAt)
             if let old = messages[value.id], old != value { throw SpaceError.conflict }
             messages[value.id] = value
         case .wishCreated(let text):

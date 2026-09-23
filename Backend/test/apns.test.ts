@@ -26,14 +26,14 @@ describe('APNs provider boundary', () => {
     expect(request.headers.get('apns-push-type')).toBe('alert');
     expect(request.headers.get('apns-expiration')).toBe('1234');
     expect(request.headers.get('apns-collapse-id')).toBe('private-affection');
-    expect(await request.json()).toEqual({ aps: { alert: { title: '我们', body: '你收到了一份小心意' }, sound: 'default', 'content-available': 1, category: 'PRIVATE_AFFECTION' }, affection_envelope: 'public-envelope-id' });
+    expect(await request.json()).toEqual({ aps: { alert: { title: '我们', body: '你收到了一份小心意' }, sound: 'default', badge: 1, 'content-available': 1, category: 'PRIVATE_AFFECTION' }, affection_envelope: 'public-envelope-id' });
   });
   it('sends category-only message and wish alerts without content or names', async () => {
     for (const [kind, body] of [['message', '你有一条新消息'], ['wish', '你有一个新愿望']] as const) {
       const request = pushRequest({ APNS_TOPIC: 'test.space' }, { pushToken: 'a'.repeat(64), environment: 'sandbox' },
         { next: 0, attempts: 0, expires: 1234000, envelopeID: 'opaque-id', alertKind: kind }, 'test');
       expect(request.headers.get('apns-collapse-id')).toBe(`private-${kind}`);
-      expect(await request.json()).toEqual({ aps: { alert: { title: '我们', body }, sound: 'default', 'content-available': 1 }, destination: kind });
+      expect(await request.json()).toEqual({ aps: { alert: { title: '我们', body }, sound: 'default', badge: 1, 'content-available': 1 }, destination: kind });
     }
   });
   it('keeps ordinary mailbox wakes silent', async () => {

@@ -15,6 +15,7 @@ struct CapsuleEditor: View {
     @State private var savedRevision: UInt64?
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var photoLoading = false
+    @State private var showingCamera = false
 
     private func field<T>(_ path: WritableKeyPath<CapsuleDraft, T>) -> Binding<T> {
         Binding(get: { draft[keyPath: path] }, set: { draft[keyPath: path] = $0; draft.revision += 1 })
@@ -38,8 +39,13 @@ struct CapsuleEditor: View {
                     TextEditor(text: field(\.text)).frame(minHeight: 180).accessibilityIdentifier("content-body")
                 }
                 Section("照片（可选）") {
-                    PhotosPicker(selection: $selectedPhoto, matching: .images) {
-                        Label("选择照片", systemImage: "photo.badge.plus")
+                    HStack(spacing: 20) {
+                        Button { showingCamera = true } label: { Label("拍照", systemImage: "camera") }
+                            .buttonStyle(.bordered)
+                        PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                            Label("从相册选择", systemImage: "photo.on.rectangle")
+                        }
+                        .buttonStyle(.bordered)
                     }
                     if let bytes = draft.photoJPEG, let image = UIImage(data: bytes) {
                         Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 180)
@@ -72,6 +78,15 @@ struct CapsuleEditor: View {
                     }
                 }.disabled(saving || photoLoading)
         }.tint(SpaceStyle.accent).interactiveDismissDisabled()
+            .sheet(isPresented: $showingCamera) {
+                CameraPicker { bytes in
+                    do {
+                        let photo = try PhotoImport.prepare(bytes)
+                        draft.photoJPEG = photo.jpeg; draft.photoWidth = photo.width; draft.photoHeight = photo.height
+                        draft.revision += 1; failure = nil
+                    } catch { failure = "无法使用这张照片，请重试。" }
+                }
+            }
             .task(id: draft) {
                 let snapshot = draft
                 do {

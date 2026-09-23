@@ -1,4 +1,17 @@
 import XCTest
+final class FreshInstallReadinessTests: XCTestCase {
+    @MainActor func testPairedLaunchAfterNotificationPermission() throws {
+        let app = XCUIApplication()
+        app.launch()
+        let system = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        if system.buttons["Allow"].waitForExistence(timeout: 5) {
+            system.buttons["Allow"].tap()
+        } else if system.buttons["允许"].exists {
+            system.buttons["允许"].tap()
+        }
+        XCTAssertTrue(app.textFields["message-draft"].waitForExistence(timeout: 25))
+    }
+}
 final class PairingOnboardingTests: XCTestCase {
     @MainActor func testCreateInviteShowsQRCodeAndRestoresProgress() throws {
         let app = XCUIApplication(); app.launch()

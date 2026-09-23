@@ -1,9 +1,9 @@
 import Foundation
 
 public enum AffectionKind: String, Codable, CaseIterable, Sendable {
-    case missYou = "想你了", hug = "抱抱", appreciation = "辛苦啦"
+    case missYou = "想你了", hug = "抱抱", kiss = "亲亲", appreciation = "辛苦啦"
     public var symbol: String {
-        switch self { case .missYou: "heart"; case .hug: "person.2"; case .appreciation: "sun.max" }
+        switch self { case .missYou: "heart"; case .hug: "person.2"; case .kiss: "heart.circle"; case .appreciation: "sun.max" }
     }
 }
 

@@ -9,8 +9,12 @@ public struct ChecklistContent: Codable, Equatable, Sendable {
     public var category: ListCategory
     public var completed: Bool
     public var deleted: Bool
-    public init(text: String, category: ListCategory, completed: Bool = false, deleted: Bool = false) {
-        self.text = text; self.category = category; self.completed = completed; self.deleted = deleted
+    /// Optional keeps existing encrypted snapshots and events backward compatible.
+    public var dueAt: Date?
+    public init(text: String, category: ListCategory, completed: Bool = false, deleted: Bool = false,
+                dueAt: Date? = nil) {
+        self.text = text; self.category = category; self.completed = completed
+        self.deleted = deleted; self.dueAt = dueAt
     }
 }
 
@@ -59,7 +63,9 @@ public enum JournalOperation: Codable, Equatable, Sendable {
         }
         switch self {
         case .anniversary(let item): try item.validate()
-        case .checklist(let item): try text(item.text, max: 2_048)
+        case .checklist(let item):
+            try text(item.text, max: 2_048)
+            guard item.dueAt?.timeIntervalSince1970.isFinite ?? true else { throw SpaceError.invalidInput }
         case .memory(let item):
             try text(item.title, max: 512)
             guard item.text.utf8.count <= 16_384, item.date.timeIntervalSince1970.isFinite,

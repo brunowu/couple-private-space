@@ -17,7 +17,7 @@ export function pushRequest(config: APNSConfig, device: PushDevice, job: PushJob
       'apns-expiration': String(Math.floor(job.expires / 1000)),
       'apns-collapse-id': alert ? `private-${kind}` : 'private-mailbox'
     }, body: JSON.stringify(alert ? {
-      aps: { alert: { title: '我们', body: kind === 'message' ? '你有一条新消息' : kind === 'wish' ? '你有一个新愿望' : '你收到了一份小心意' }, sound: 'default', 'content-available': 1, ...(kind === 'affection' ? { category: 'PRIVATE_AFFECTION' } : {}) },
+      aps: { alert: { title: '我们', body: kind === 'message' ? '你有一条新消息' : kind === 'wish' ? '你有一个新愿望' : '你收到了一份小心意' }, sound: 'default', badge: 1, 'content-available': 1, ...(kind === 'affection' ? { category: 'PRIVATE_AFFECTION' } : {}) },
       ...(kind === 'affection' ? { affection_envelope: job.envelopeID } : { destination: kind })
     } : { aps: { 'content-available': 1 } }), signal: AbortSignal.timeout(5000)
   });

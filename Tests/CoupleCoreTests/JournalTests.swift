@@ -12,6 +12,28 @@ import Domain
     #expect(restored.journal.capsules.isEmpty)
 }
 
+@Test func legacyRecordsDecodeWithoutReminderOrDisplayTimestamps() throws {
+    let checklist = ChecklistContent(text: "带伞", category: .doTogether)
+    var checklistObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(checklist)) as! [String: Any]
+    checklistObject.removeValue(forKey: "dueAt")
+    let restoredChecklist = try JSONDecoder().decode(
+        ChecklistContent.self,
+        from: JSONSerialization.data(withJSONObject: checklistObject)
+    )
+    #expect(restoredChecklist.dueAt == nil)
+
+    let author = UUID(), id = UUID()
+    let version = Version(clock: 1, author: author, event: UUID())
+    let message = Message(id: id, author: author, text: "旧消息", version: version)
+    var messageObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(message)) as! [String: Any]
+    messageObject.removeValue(forKey: "createdAt")
+    let restoredMessage = try JSONDecoder().decode(
+        Message.self,
+        from: JSONSerialization.data(withJSONObject: messageObject)
+    )
+    #expect(restoredMessage.createdAt == nil)
+}
+
 @Test func checklistConcurrentEditsAndDeletionConverge() throws {
     let a = UUID(), b = UUID(), id = UUID(), now = Date()
     let create = DomainEvent(objectID: id, author: a, sequence: 1, lamport: 1, createdAt: now,

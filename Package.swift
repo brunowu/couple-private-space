@@ -13,6 +13,9 @@ let package = Package(
         .library(name: "DevelopmentSupport", targets: ["DevelopmentSupport"]),
         .executable(name: "couple-lab", targets: ["CoupleLab"])
     ],
+    dependencies: [
+        .package(url: "https://github.com/weichsel/ZIPFoundation.git", exact: "0.9.20")
+    ],
     targets: [
         .binaryTarget(name: "SignalNative", path: ".dependencies/SignalNative.xcframework"),
         .target(name: "LibSignalClient", dependencies: ["SignalNative"], path: signalRoot + "/swift/Sources/LibSignalClient",
@@ -33,7 +36,9 @@ let package = Package(
         .target(name: "Transport", dependencies: ["Domain"]),
         .target(name: "Notification", dependencies: ["Domain"]),
         .target(name: "Sync", dependencies: ["Domain", "Crypto", "Transport", "Notification"]),
-        .target(name: "UI", dependencies: ["Domain", "Sync", "Notification"]),
+        .target(name: "UI", dependencies: ["Domain", "Sync", "Notification",
+                .product(name: "ZIPFoundation", package: "ZIPFoundation")],
+                resources: [.copy("BundledStickerPacks")]),
         .target(name: "Application", dependencies: ["Domain", "Crypto", "Persistence", "Transport", "Sync", "Notification", "UI"]),
         .target(name: "DevelopmentSupport", dependencies: ["Domain", "Crypto", "Persistence", "Transport", "Sync", "Notification", "UI"]),
         .executableTarget(name: "CoupleLab", dependencies: ["Domain", "Crypto", "Persistence", "Transport", "Sync"]),
