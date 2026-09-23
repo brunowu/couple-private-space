@@ -540,7 +540,7 @@ struct StickerLibraryView: View {
                             }
                             LazyVGrid(columns: [GridItem(.adaptive(minimum: 82), spacing: 12)], spacing: 12) {
                             ForEach(filteredStickers) { sticker in
-                                VisibleStickerThumbnail(sticker: sticker)
+                                LocalStickerThumbnail(url: sticker.thumbnailURL)
                                     .frame(height: 82).frame(maxWidth: .infinity)
                                     .background(SpaceStyle.softSurface, in: RoundedRectangle(cornerRadius: 14))
                                     .contentShape(RoundedRectangle(cornerRadius: 14))
@@ -642,37 +642,6 @@ private struct LocalStickerThumbnail: View {
             Image(uiImage: image).resizable().scaledToFit()
         } else {
             Image(systemName: "face.smiling").foregroundStyle(.secondary)
-        }
-    }
-}
-
-/// Loads and animates an original sticker only while its lazy-grid cell is on screen.
-private struct VisibleStickerThumbnail: View {
-    let sticker: InstalledSticker
-    @State private var data: Data?
-    @State private var visible = false
-    @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    var body: some View {
-        Group {
-            if sticker.record.mediaType == "image/gif", let data {
-                AnimatedStickerImage(data: data, cacheKey: "picker-\(sticker.id)",
-                                     animate: visible && scenePhase == .active && !reduceMotion)
-            } else {
-                LocalStickerThumbnail(url: sticker.thumbnailURL)
-            }
-        }
-        .onScrollVisibilityChange(threshold: 0.05) { isVisible in
-            visible = isVisible
-            if !isVisible { data = nil }
-        }
-        .task(id: "\(sticker.id)-\(visible)") {
-            guard visible, sticker.record.mediaType == "image/gif", data == nil else { return }
-            let url = sticker.mediaURL
-            data = await Task.detached(priority: .utility) {
-                try? Data(contentsOf: url, options: .mappedIfSafe)
-            }.value
         }
     }
 }
