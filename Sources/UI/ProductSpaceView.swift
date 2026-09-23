@@ -1580,8 +1580,8 @@ struct AnimatedStickerImage: UIViewRepresentable {
     }
     final class Coordinator {
         var key: String?
-        var finish: DispatchWorkItem?
         var generation = UUID()
+        var isAnimating = false
     }
     private static let cache: NSCache<NSString, Animation> = {
         let cache = NSCache<NSString, Animation>()
@@ -1599,17 +1599,19 @@ struct AnimatedStickerImage: UIViewRepresentable {
     }
     func updateUIView(_ view: UIImageView, context: Context) {
         if !animate {
-            context.coordinator.finish?.cancel()
+            context.coordinator.generation = UUID()
+            context.coordinator.isAnimating = false
             view.stopAnimating()
             if let first = view.animationImages?.first { view.image = first }
             view.animationImages = nil
             return
         }
-        guard context.coordinator.key != cacheKey else { return }
-        context.coordinator.key = cacheKey
-        context.coordinator.finish?.cancel()
-        view.stopAnimating(); view.animationImages = nil
-        view.image = UIImage(data: data)
+        if context.coordinator.key == cacheKey, context.coordinator.isAnimating { return }
+        if context.coordinator.key != cacheKey {
+            context.coordinator.key = cacheKey
+            view.stopAnimating(); view.animationImages = nil
+            view.image = UIImage(data: data)
+        }
         let generation = UUID(); context.coordinator.generation = generation
         if let cached = Self.cache.object(forKey: cacheKey as NSString) {
             Self.play(cached, in: view, coordinator: context.coordinator, generation: generation)
@@ -1626,7 +1628,7 @@ struct AnimatedStickerImage: UIViewRepresentable {
         }
     }
     static func dismantleUIView(_ view: UIImageView, coordinator: Coordinator) {
-        coordinator.generation = UUID(); coordinator.finish?.cancel()
+        coordinator.generation = UUID(); coordinator.isAnimating = false
         view.stopAnimating(); view.animationImages = nil; view.image = nil
     }
     @MainActor private static func play(_ animation: Animation, in view: UIImageView,
@@ -1634,16 +1636,10 @@ struct AnimatedStickerImage: UIViewRepresentable {
         guard coordinator.generation == generation, !animation.frames.isEmpty else { return }
         view.animationImages = animation.frames
         view.animationDuration = animation.duration
-        view.animationRepeatCount = 1
-        view.image = animation.frames.last
+        view.animationRepeatCount = 0
+        view.image = animation.frames.first
+        coordinator.isAnimating = true
         view.startAnimating()
-        let finish = DispatchWorkItem { [weak view, weak coordinator] in
-            guard coordinator?.generation == generation else { return }
-            view?.stopAnimating(); view?.animationImages = nil
-            view?.image = animation.frames.last
-        }
-        coordinator.finish = finish
-        DispatchQueue.main.asyncAfter(deadline: .now() + animation.duration, execute: finish)
     }
     nonisolated private static func decode(_ data: Data) -> Animation? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }

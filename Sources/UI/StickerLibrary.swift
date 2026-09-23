@@ -359,6 +359,7 @@ struct StickerLibraryView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var importing = false
     @State private var preview: InstalledSticker?
+    @State private var heldPreview: InstalledSticker?
     @State private var query = ""
     @State private var selectedPack: String?
     @State private var selectedCategory = "全部"
@@ -543,15 +544,15 @@ struct StickerLibraryView: View {
                                     if let onSend { library.markUsed(sticker, query: query); onSend(sticker); dismiss() }
                                     else { preview = sticker }
                                 } label: {
-                                    LocalStickerThumbnail(url: sticker.thumbnailURL)
+                                    VisibleStickerThumbnail(sticker: sticker)
                                     .frame(height: 82).frame(maxWidth: .infinity)
                                     .background(SpaceStyle.softSurface, in: RoundedRectangle(cornerRadius: 14))
                                 }
                                 .buttonStyle(.plain)
-                                .contextMenu {
-                                    EmptyView()
-                                } preview: {
-                                    StickerPeekPreview(sticker: sticker)
+                                .onLongPressGesture(minimumDuration: 0.35, maximumDistance: 28) {
+                                    heldPreview = sticker
+                                } onPressingChanged: { pressing in
+                                    if !pressing { heldPreview = nil }
                                 }
                             }
                             }
@@ -583,6 +584,14 @@ struct StickerLibraryView: View {
                 if case .success(let url) = result { library.importPack(url) }
             }
             .overlay { if library.importing { ProgressView("正在验证并导入…").padding().background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16)) } }
+            .overlay {
+                if let heldPreview {
+                    Color.black.opacity(0.16).ignoresSafeArea().allowsHitTesting(false)
+                    StickerPeekPreview(sticker: heldPreview)
+                        .shadow(color: .black.opacity(0.18), radius: 24, y: 10)
+                        .allowsHitTesting(false)
+                }
+            }
             .alert("表情包", isPresented: Binding(get: { library.status != nil }, set: { if !$0 { library.status = nil } })) {
                 Button("好") { library.status = nil }
             } message: { Text(library.status ?? "") }
@@ -633,6 +642,39 @@ private struct LocalStickerThumbnail: View {
             Image(uiImage: image).resizable().scaledToFit()
         } else {
             Image(systemName: "face.smiling").foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Loads and animates an original sticker only while its lazy-grid cell is on screen.
+private struct VisibleStickerThumbnail: View {
+    let sticker: InstalledSticker
+    @State private var data: Data?
+    @State private var visible = false
+    @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        Group {
+            if sticker.record.mediaType == "image/gif", let data {
+                AnimatedStickerImage(data: data, cacheKey: "picker-\(sticker.id)",
+                                     animate: visible && scenePhase == .active && !reduceMotion)
+            } else {
+                LocalStickerThumbnail(url: sticker.thumbnailURL)
+            }
+        }
+        .onAppear {
+            visible = true
+            guard sticker.record.mediaType == "image/gif", data == nil else { return }
+            let url = sticker.mediaURL
+            Task.detached(priority: .utility) {
+                let loaded = try? Data(contentsOf: url, options: .mappedIfSafe)
+                await MainActor.run { if visible { data = loaded } }
+            }
+        }
+        .onDisappear {
+            visible = false
+            data = nil
         }
     }
 }
