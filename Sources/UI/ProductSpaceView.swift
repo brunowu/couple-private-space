@@ -1419,12 +1419,13 @@ private struct PhotoBubble: View {
                     Group {
                         if kind == "image/gif", let jpeg {
                             AnimatedStickerImage(data: jpeg)
+                                .frame(width: 144, height: 144)
                         } else {
                             Image(uiImage: image).resizable().scaledToFit()
+                                .frame(maxWidth: 240, maxHeight: 280)
+                                .clipShape(RoundedRectangle(cornerRadius: 18))
                         }
                     }
-                        .frame(maxWidth: 240, maxHeight: 280)
-                        .clipShape(RoundedRectangle(cornerRadius: 18))
                         .onTapGesture { preview(image) }
                         .accessibilityLabel("打开照片预览")
                     Button {
@@ -1506,7 +1507,7 @@ private struct LocalStickerBubble: View {
                 ProgressView().controlSize(.small)
             }
         }
-        .frame(width: 160, height: 160)
+        .frame(width: 144, height: 144)
         .task(id: sticker.id) {
             data = try? Data(contentsOf: sticker.mediaURL, options: .mappedIfSafe)
         }
