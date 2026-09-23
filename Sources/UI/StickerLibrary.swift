@@ -368,15 +368,20 @@ struct StickerLibraryView: View {
         let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
             let terms = searchTerms(for: trimmed)
-            let matches = library.stickers.filter { matchScore($0, terms: terms, raw: trimmed) > 0 }
+            // Score each item once. Re-running score inside a sort comparator made every
+            // keystroke needlessly expensive with a library of a few thousand stickers.
+            let matches = library.stickers.compactMap { sticker -> (InstalledSticker, Int)? in
+                let score = matchScore(sticker, terms: terms, raw: trimmed)
+                return score > 0 ? (sticker, score) : nil
+            }
             let learned = library.searchChoices[normalize(trimmed)] ?? []
             var rank: [String: Int] = [:]
             for (index, id) in learned.enumerated() where rank[id] == nil { rank[id] = index }
             return matches.sorted {
-                let leftLearned = rank[$0.id] ?? Int.max, rightLearned = rank[$1.id] ?? Int.max
+                let leftLearned = rank[$0.0.id] ?? Int.max, rightLearned = rank[$1.0.id] ?? Int.max
                 if leftLearned != rightLearned { return leftLearned < rightLearned }
-                return matchScore($0, terms: terms, raw: trimmed) > matchScore($1, terms: terms, raw: trimmed)
-            }
+                return $0.1 > $1.1
+            }.map(\.0)
         }
         if selectedPack == Self.recentTitle {
             var byID: [String: InstalledSticker] = [:]
@@ -541,10 +546,13 @@ struct StickerLibraryView: View {
                                     LocalStickerThumbnail(url: sticker.thumbnailURL)
                                     .frame(height: 82).frame(maxWidth: .infinity)
                                     .background(SpaceStyle.softSurface, in: RoundedRectangle(cornerRadius: 14))
-                                }.buttonStyle(.plain)
-                                    .contextMenu {
-                                        Button("预览", systemImage: "eye") { preview = sticker }
-                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .contextMenu {
+                                    EmptyView()
+                                } preview: {
+                                    StickerPeekPreview(sticker: sticker)
+                                }
                             }
                             }
                         }.padding(16)
@@ -621,11 +629,28 @@ struct StickerLibraryView: View {
 private struct LocalStickerThumbnail: View {
     let url: URL
     var body: some View {
-        if let image = UIImage(contentsOfFile: url.path) {
+        if let image = StickerThumbnailCache.image(at: url) {
             Image(uiImage: image).resizable().scaledToFit()
         } else {
             Image(systemName: "face.smiling").foregroundStyle(.secondary)
         }
+    }
+}
+
+private enum StickerThumbnailCache {
+    static let images: NSCache<NSString, UIImage> = {
+        let cache = NSCache<NSString, UIImage>()
+        cache.countLimit = 240
+        cache.totalCostLimit = 24 * 1024 * 1024
+        return cache
+    }()
+    static func image(at url: URL) -> UIImage? {
+        let key = url.path as NSString
+        if let cached = images.object(forKey: key) { return cached }
+        guard let image = UIImage(contentsOfFile: url.path) else { return nil }
+        let cost = Int(image.size.width * image.size.height * image.scale * image.scale * 4)
+        images.setObject(image, forKey: key, cost: cost)
+        return image
     }
 }
 
@@ -638,6 +663,33 @@ private struct StickerPreview: View {
                 .navigationTitle(sticker.packTitle).navigationBarTitleDisplayMode(.inline)
                 .toolbar { Button("完成") { dismiss() } }
         }
+    }
+}
+
+/// Native press-and-hold preview: no intermediary menu item and no second window.
+private struct StickerPeekPreview: View {
+    let sticker: InstalledSticker
+    @State private var data: Data?
+
+    var body: some View {
+        Group {
+            if let data {
+                if sticker.record.mediaType == "image/gif" {
+                    AnimatedStickerImage(data: data, cacheKey: "peek-\(sticker.id)", animate: true)
+                } else if let image = UIImage(data: data) {
+                    Image(uiImage: image).resizable().scaledToFit()
+                }
+            } else {
+                ProgressView()
+            }
+        }
+        .frame(width: 220, height: 220)
+        .padding(18)
+        .background(SpaceStyle.surface)
+        .task(id: sticker.id) {
+            data = try? Data(contentsOf: sticker.mediaURL, options: .mappedIfSafe)
+        }
+        .accessibilityLabel("预览表情")
     }
 }
 
