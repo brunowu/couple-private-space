@@ -1464,7 +1464,7 @@ private struct PhotoBubble: View {
     }
 }
 
-private struct AnimatedStickerImage: UIViewRepresentable {
+struct AnimatedStickerImage: UIViewRepresentable {
     let data: Data
     let cacheKey: String
     let animate: Bool

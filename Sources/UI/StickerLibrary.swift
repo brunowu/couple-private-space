@@ -546,10 +546,13 @@ struct StickerLibraryView: View {
                                     LocalStickerThumbnail(url: sticker.thumbnailURL)
                                     .frame(height: 82).frame(maxWidth: .infinity)
                                     .background(SpaceStyle.softSurface, in: RoundedRectangle(cornerRadius: 14))
-                                }.buttonStyle(.plain)
-                                    .contextMenu {
-                                        Button("预览", systemImage: "eye") { preview = sticker }
-                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .contextMenu {
+                                    EmptyView()
+                                } preview: {
+                                    StickerPeekPreview(sticker: sticker)
+                                }
                             }
                             }
                         }.padding(16)
@@ -660,6 +663,33 @@ private struct StickerPreview: View {
                 .navigationTitle(sticker.packTitle).navigationBarTitleDisplayMode(.inline)
                 .toolbar { Button("完成") { dismiss() } }
         }
+    }
+}
+
+/// Native press-and-hold preview: no intermediary menu item and no second window.
+private struct StickerPeekPreview: View {
+    let sticker: InstalledSticker
+    @State private var data: Data?
+
+    var body: some View {
+        Group {
+            if let data {
+                if sticker.record.mediaType == "image/gif" {
+                    AnimatedStickerImage(data: data, cacheKey: "peek-\(sticker.id)", animate: true)
+                } else if let image = UIImage(data: data) {
+                    Image(uiImage: image).resizable().scaledToFit()
+                }
+            } else {
+                ProgressView()
+            }
+        }
+        .frame(width: 220, height: 220)
+        .padding(18)
+        .background(SpaceStyle.surface)
+        .task(id: sticker.id) {
+            data = try? Data(contentsOf: sticker.mediaURL, options: .mappedIfSafe)
+        }
+        .accessibilityLabel("预览表情")
     }
 }
 
