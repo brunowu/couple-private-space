@@ -540,20 +540,20 @@ struct StickerLibraryView: View {
                             }
                             LazyVGrid(columns: [GridItem(.adaptive(minimum: 82), spacing: 12)], spacing: 12) {
                             ForEach(filteredStickers) { sticker in
-                                Button {
-                                    if let onSend { library.markUsed(sticker, query: query); onSend(sticker); dismiss() }
-                                    else { preview = sticker }
-                                } label: {
-                                    VisibleStickerThumbnail(sticker: sticker)
+                                VisibleStickerThumbnail(sticker: sticker)
                                     .frame(height: 82).frame(maxWidth: .infinity)
                                     .background(SpaceStyle.softSurface, in: RoundedRectangle(cornerRadius: 14))
-                                }
-                                .buttonStyle(.plain)
-                                .onLongPressGesture(minimumDuration: 0.35, maximumDistance: 28) {
-                                    heldPreview = sticker
-                                } onPressingChanged: { pressing in
-                                    if !pressing { heldPreview = nil }
-                                }
+                                    .contentShape(RoundedRectangle(cornerRadius: 14))
+                                    .onTapGesture {
+                                    if let onSend { library.markUsed(sticker, query: query); onSend(sticker); dismiss() }
+                                    else { preview = sticker }
+                                    }
+                                    .onLongPressGesture(minimumDuration: 0.35, maximumDistance: 28) {
+                                        heldPreview = sticker
+                                    } onPressingChanged: { pressing in
+                                        if !pressing { heldPreview = nil }
+                                    }
+                                    .accessibilityAddTraits(.isButton)
                             }
                             }
                         }.padding(16)
@@ -663,18 +663,16 @@ private struct VisibleStickerThumbnail: View {
                 LocalStickerThumbnail(url: sticker.thumbnailURL)
             }
         }
-        .onAppear {
-            visible = true
-            guard sticker.record.mediaType == "image/gif", data == nil else { return }
-            let url = sticker.mediaURL
-            Task.detached(priority: .utility) {
-                let loaded = try? Data(contentsOf: url, options: .mappedIfSafe)
-                await MainActor.run { if visible { data = loaded } }
-            }
+        .onScrollVisibilityChange(threshold: 0.05) { isVisible in
+            visible = isVisible
+            if !isVisible { data = nil }
         }
-        .onDisappear {
-            visible = false
-            data = nil
+        .task(id: "\(sticker.id)-\(visible)") {
+            guard visible, sticker.record.mediaType == "image/gif", data == nil else { return }
+            let url = sticker.mediaURL
+            data = await Task.detached(priority: .utility) {
+                try? Data(contentsOf: url, options: .mappedIfSafe)
+            }.value
         }
     }
 }
