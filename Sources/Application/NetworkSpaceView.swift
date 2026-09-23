@@ -36,6 +36,7 @@ import Vision
     @Published var anniversaryReminderStatus = "纪念日提醒尚未开启。"
     @Published var pushStatus = "后台通知尚未开启。"
     @Published var notificationFeedback: String?
+    @Published var backupStatus = "尚未创建加密备份。"
     private var registeredPush: String?
     private var registeringPush = false
     private var client: NetworkPair?
@@ -167,6 +168,20 @@ import Vision
     func photoData(_ id: UUID) async throws -> Data? {
         guard let client else { throw SpaceError.notPaired }
         return try await client.photoData(id)
+    }
+    func createEncryptedBackup() async throws -> SpaceBackupArtifact {
+        guard let client else { throw SpaceError.notPaired }
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("CoupleBackups", isDirectory: true)
+        let artifact = try await client.createEncryptedBackup(outputDirectory: directory)
+        backupStatus = "备份已在本机完成校验。恢复密钥需要与备份文件分开保存。"
+        return artifact
+    }
+
+    func verifyEncryptedBackup(fileURL: URL, recoveryKey: String) async throws -> SpaceBackupPreview {
+        guard let client else { throw SpaceError.notPaired }
+        let preview = try await client.verifyEncryptedBackup(fileURL: fileURL, recoveryKey: recoveryKey)
+        backupStatus = "备份完整且密钥正确。校验过程没有修改当前空间。"
+        return preview
     }
     func updateProfile(name: String, avatar: (jpeg: Data, width: Int, height: Int)?,
                        retainedAvatarID: UUID?) async throws {
@@ -613,7 +628,10 @@ public struct NetworkSpaceView: View {
                     openWishReminder: model.openWishReminder, prepareCapsuleDraft: model.prepareCapsuleDraft,
                     pushStatus: model.pushStatus, configurePush: { try await model.configurePush(affection: $0, messages: $1, wishes: $2) },
                     revokePairing: model.revokePairing,
-                    appLockEnabled: privacyLock.enabled, configureAppLock: privacyLock.setEnabled)
+                    appLockEnabled: privacyLock.enabled, configureAppLock: privacyLock.setEnabled,
+                    backupStatus: model.backupStatus,
+                    createEncryptedBackup: model.createEncryptedBackup,
+                    verifyEncryptedBackup: model.verifyEncryptedBackup)
             } else if model.stage == "revoked" {
                 NavigationStack {
                     List {

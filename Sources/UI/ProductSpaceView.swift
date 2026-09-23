@@ -6,6 +6,7 @@ import PhotosUI
 import QuickLook
 import UserNotifications
 import ImageIO
+import UniformTypeIdentifiers
 
 enum SpaceStyle {
     static let accent = Color(uiColor: UIColor { traits in
@@ -129,8 +130,18 @@ public struct ProductSpaceView: View {
     let revokePairing: () async throws -> Void
     let appLockEnabled: Bool
     let configureAppLock: (Bool) async throws -> Void
+    let backupStatus: String
+    let createEncryptedBackup: () async throws -> SpaceBackupArtifact
+    let verifyEncryptedBackup: (URL, String) async throws -> SpaceBackupPreview
     @State private var showRevokeConfirmation = false
     @State private var revoking = false
+    @State private var backupBusy = false
+    @State private var backupRecoveryKey = ""
+    @State private var backupPreview: SpaceBackupPreview?
+    @State private var showingBackupImporter = false
+    @State private var backupVerificationURL: URL?
+    @State private var backupVerificationKey = ""
+    @State private var showingBackupVerifier = false
     @State private var pushEnabled = UserDefaults.standard.object(forKey: "affection-push-enabled") as? Bool ?? true
     @State private var messagePushEnabled = UserDefaults.standard.object(forKey: "message-push-enabled") as? Bool ?? true
     @State private var wishPushEnabled = UserDefaults.standard.object(forKey: "wish-push-enabled") as? Bool ?? true
@@ -211,7 +222,10 @@ public struct ProductSpaceView: View {
                 prepareCapsuleDraft: @escaping (CapsuleDraft) async throws -> CapsuleDraft,
                 pushStatus: String, configurePush: @escaping (Bool, Bool, Bool) async throws -> Void,
                 revokePairing: @escaping () async throws -> Void,
-                appLockEnabled: Bool, configureAppLock: @escaping (Bool) async throws -> Void) {
+                appLockEnabled: Bool, configureAppLock: @escaping (Bool) async throws -> Void,
+                backupStatus: String,
+                createEncryptedBackup: @escaping () async throws -> SpaceBackupArtifact,
+                verifyEncryptedBackup: @escaping (URL, String) async throws -> SpaceBackupPreview) {
         self.state = state; self.localID = localID; self.peerDeviceID = peerDeviceID
         self.pairingCode = pairingCode; self.showPairingFinal = showPairingFinal; self.isCycleOwner = isCycleOwner
         self.deliveries = deliveries; self.save = save; self.cycle = cycle
@@ -233,6 +247,9 @@ public struct ProductSpaceView: View {
         self.pushStatus = pushStatus; self.configurePush = configurePush
         self.revokePairing = revokePairing
         self.appLockEnabled = appLockEnabled; self.configureAppLock = configureAppLock
+        self.backupStatus = backupStatus
+        self.createEncryptedBackup = createEncryptedBackup
+        self.verifyEncryptedBackup = verifyEncryptedBackup
     }
 
     public var body: some View {
@@ -323,6 +340,27 @@ public struct ProductSpaceView: View {
         .sheet(item: $sharePayload) { payload in
             ActivityShareSheet(items: payload.items)
         }
+        .sheet(isPresented: $showingBackupVerifier) {
+            NavigationStack {
+                Form {
+                    Section("恢复密钥") {
+                        SecureField("CPS1-…", text: $backupVerificationKey)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    }
+                    Section {
+                        Text("这里只校验文件完整性、恢复密钥和设备身份，不会导入或修改当前空间。")
+                            .font(.footnote).foregroundStyle(.secondary)
+                    }
+                }
+                .navigationTitle("校验加密备份")
+                .toolbar {
+                    ToolbarItem(placement: .cancellationAction) { Button("取消") { showingBackupVerifier = false } }
+                    ToolbarItem(placement: .confirmationAction) {
+                        Button("校验") { verifySelectedBackup() }.disabled(backupVerificationKey.isEmpty || backupBusy)
+                    }
+                }
+            }
+        }
         .fullScreenCover(item: $photoPreview) { preview in
             PhotoViewer(preview: preview, load: loadPhoto)
         }
@@ -372,6 +410,15 @@ public struct ProductSpaceView: View {
         }
         .onChange(of: selectedChatPhotos) { _, photos in
             if !photos.isEmpty { Task { await sendSelectedPhotos(photos) } }
+        }
+        .fileImporter(isPresented: $showingBackupImporter, allowedContentTypes: [.data]) { result in
+            switch result {
+            case .success(let url):
+                backupVerificationURL = url
+                backupVerificationKey = ""
+                showingBackupVerifier = true
+            case .failure(let error): failure = error.localizedDescription
+            }
         }
         .onChange(of: chatLatestClock) { _, _ in if tab == 0 { markChatRead() } }
         .onAppear {
@@ -527,6 +574,36 @@ public struct ProductSpaceView: View {
             sharePayload = ChatSharePayload(items: [url])
         } catch {
             failure = "暂时无法生成对话文件，请重试。"
+        }
+    }
+    private func createBackup() {
+        backupBusy = true
+        Task {
+            defer { backupBusy = false }
+            do {
+                let artifact = try await createEncryptedBackup()
+                backupRecoveryKey = artifact.recoveryKey
+                backupPreview = artifact.preview
+                // Share only the encrypted file. The recovery key is copied separately.
+                sharePayload = ChatSharePayload(items: [artifact.fileURL])
+            } catch {
+                failure = "未能创建备份：\(error.localizedDescription)"
+            }
+        }
+    }
+    private func verifySelectedBackup() {
+        guard let url = backupVerificationURL else { return }
+        backupBusy = true
+        Task {
+            defer { backupBusy = false }
+            let accessed = url.startAccessingSecurityScopedResource()
+            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+            do {
+                backupPreview = try await verifyEncryptedBackup(url, backupVerificationKey)
+                showingBackupVerifier = false
+            } catch {
+                failure = "备份文件、恢复密钥或完整性校验不通过。"
+            }
         }
     }
     private func affectionText(_ kind: AffectionKind) -> String {
@@ -1098,6 +1175,30 @@ public struct ProductSpaceView: View {
                 Text("解除会停止这段配对的同步；本机和伴侣设备已保存的内容不会自动删除。")
                     .font(.footnote).foregroundStyle(.secondary)
             }.id("privacy")
+            Section("加密备份") {
+                Button {
+                    createBackup()
+                } label: { Label(backupBusy ? "正在生成…" : "创建完整加密备份", systemImage: "externaldrive.badge.lock") }
+                    .disabled(backupBusy)
+                    .accessibilityIdentifier("create-encrypted-backup")
+                Button { showingBackupImporter = true } label: {
+                    Label("校验已有备份", systemImage: "checkmark.shield")
+                }.disabled(backupBusy)
+                if !backupRecoveryKey.isEmpty {
+                    Text("本次恢复密钥").font(.caption).foregroundStyle(.secondary)
+                    Text(backupRecoveryKey).font(.caption.monospaced()).textSelection(.enabled)
+                    Button("复制恢复密钥") { UIPasteboard.general.string = backupRecoveryKey }
+                    Text("请把恢复密钥与 .couplebackup 文件分开保存。丢失密钥后无法恢复。")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                if let backupPreview {
+                    Text("\(backupPreview.createdAt.formatted(date: .abbreviated, time: .shortened)) · \(backupPreview.messageCount) 条消息 · \(backupPreview.photoCount) 个媒体 · \(backupPreview.wishCount) 个愿望")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Text(backupStatus).font(.footnote).foregroundStyle(.secondary)
+                Text("当前版本只允许在这里创建和校验。不会覆盖当前配对；恢复仅用于全新的空白安装。")
+                    .font(.footnote).foregroundStyle(.secondary)
+            }
             Section("后台通知") {
                 Toggle("新消息", isOn: $messagePushEnabled)
                 Toggle("收到新愿望", isOn: $wishPushEnabled)

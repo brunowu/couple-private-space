@@ -89,6 +89,27 @@ public final class EncryptedDatabase: TransactionalStore {
         }
     }
     public func cipherVersion() throws -> String { try scalarText("PRAGMA cipher_version;") ?? "" }
+    /// Produces a transactionally consistent encrypted copy while this connection remains open.
+    public func snapshot(to destination: URL, key: Data) throws {
+        guard key.count == 32 else { throw DatabaseError.key }
+        try? FileManager.default.removeItem(at: destination)
+        var target: OpaquePointer?
+        guard sqlite3_open_v2(destination.path, &target,
+                              SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+              let target else { throw DatabaseError.open }
+        defer { sqlite3_close(target) }
+        guard key.withUnsafeBytes({ sqlite3_key(target, $0.baseAddress, Int32(key.count)) }) == SQLITE_OK else {
+            throw DatabaseError.key
+        }
+        guard let backup = sqlite3_backup_init(target, "main", db, "main") else { throw DatabaseError.statement }
+        let result = sqlite3_backup_step(backup, -1)
+        let finish = sqlite3_backup_finish(backup)
+        guard result == SQLITE_DONE, finish == SQLITE_OK else { throw DatabaseError.statement }
+        #if os(iOS)
+        try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                                              ofItemAtPath: destination.path)
+        #endif
+    }
     private var transient: sqlite3_destructor_type { unsafeBitCast(-1, to: sqlite3_destructor_type.self) }
     private func bind(_ value: String, at index: Int32, to stmt: OpaquePointer) throws {
         guard value.withCString({ sqlite3_bind_text(stmt, index, $0, -1, transient) }) == SQLITE_OK else { throw DatabaseError.statement }

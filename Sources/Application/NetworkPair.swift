@@ -118,6 +118,29 @@ public actor NetworkPair {
         let output = setup.stage == "revoked" ? "" : setup.final ?? setup.response ?? setup.invitation ?? ""
         return (setup.stage, output, setup.context.cycleOwner == setup.context.localID, setup.context.localID, setup.creator)
     }
+    /// Creates a read-only, authenticated snapshot. Pairing and live database state are unchanged.
+    public func createEncryptedBackup(outputDirectory: URL) async throws -> SpaceBackupArtifact {
+        guard let setup, setup.stage == "paired" else { throw SpaceError.notPaired }
+        let databaseKeyName = "network.database"
+        let identityKeyName = "identity.\(setup.context.localID.uuidString)"
+        guard let databaseKey = try vault.load(databaseKeyName),
+              let authKey = try vault.load("network.auth"),
+              let identityKey = try vault.load(identityKeyName) else { throw SpaceBackupError.incompleteIdentity }
+        let snapshotURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("couple-backup-snapshot-\(UUID().uuidString).sqlite")
+        defer { try? FileManager.default.removeItem(at: snapshotURL) }
+        try db.snapshot(to: snapshotURL, key: databaseKey)
+        let snapshot = try Data(contentsOf: snapshotURL, options: .mappedIfSafe)
+        let shared = try await state()
+        return try SpaceBackupService.create(database: snapshot, databaseKey: databaseKey,
+                                             authKey: authKey, identityKey: identityKey,
+                                             localID: setup.context.localID, peerID: setup.context.peerID,
+                                             state: shared, outputDirectory: outputDirectory)
+    }
+
+    public func verifyEncryptedBackup(fileURL: URL, recoveryKey: String) throws -> SpaceBackupPreview {
+        try SpaceBackupService.verify(fileURL: fileURL, recoveryKey: recoveryKey)
+    }
     public func invitationExpiry() throws -> Date? {
         if setup?.stage == "revoked" { return nil }
         guard let text = setup?.invitation else { return nil }
