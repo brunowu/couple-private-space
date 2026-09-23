@@ -668,20 +668,22 @@ public struct ProductSpaceView: View {
                                     Text(name(for: entry.author)).font(.caption2).foregroundStyle(.secondary)
                                     switch entry.content {
                                     case .text(let message):
-                                        messageBody(message).padding(14)
-                                            .background(entry.author == localID ? SpaceStyle.accent.opacity(0.14) : card,
-                                                        in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                                            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
-                                                .strokeBorder(entry.author == localID ? SpaceStyle.accent.opacity(0.10) : SpaceStyle.border, lineWidth: 1))
-                                            .contextMenu {
-                                                if StickerReference.stickerID(from: message.text) == nil {
+                                        if StickerReference.stickerID(from: message.text) != nil {
+                                            messageBody(message)
+                                        } else {
+                                            messageBody(message).padding(14)
+                                                .background(entry.author == localID ? SpaceStyle.accent.opacity(0.14) : card,
+                                                            in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                                                .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous)
+                                                    .strokeBorder(entry.author == localID ? SpaceStyle.accent.opacity(0.10) : SpaceStyle.border, lineWidth: 1))
+                                                .contextMenu {
                                                     Button("复制", systemImage: "doc.on.doc") {
                                                         UIPasteboard.general.string = message.text
                                                     }
                                                     Button("引用", systemImage: "quote.bubble") { quotedMessage = message; chatFocused = true }
                                                     Button("加入共同回忆", systemImage: "bookmark") { remember(id: message.id, title: "收藏的对话", text: message.text, date: Date()) }
                                                 }
-                                            }
+                                        }
                                     case .photo(let asset):
                                         PhotoBubble(id: asset.id, kind: asset.manifest.kind,
                                                     load: loadPhoto, refresh: photoRefresh,

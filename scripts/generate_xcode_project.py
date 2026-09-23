@@ -31,7 +31,7 @@ for level,letters in [('project','p'),('app','a'),('test','t')]:
   settings={'IPHONEOS_DEPLOYMENT_TARGET':'18.0','SDKROOT':'iphoneos','SWIFT_VERSION':'5.0','CLANG_ENABLE_MODULES':'YES','SWIFT_ENABLE_EXPLICIT_MODULES':'NO'}
   if mode=='Debug': settings.update({'SWIFT_ACTIVE_COMPILATION_CONDITIONS':'DEBUG','SWIFT_OPTIMIZATION_LEVEL':'-Onone','GCC_PREPROCESSOR_DEFINITIONS':'DEBUG=1','ONLY_ACTIVE_ARCH':'YES'})
   if level!='project': settings.update({'GENERATE_INFOPLIST_FILE':'YES','TARGETED_DEVICE_FAMILY':'1','CODE_SIGN_STYLE':'Automatic','DEVELOPMENT_TEAM':'7UBMFSCK2T','PRODUCT_NAME':'$(TARGET_NAME)','PRODUCT_BUNDLE_IDENTIFIER':'private.couple.space.development' + ('.uitests' if level=='test' else '')})
-  if level=='app': settings.update({'INFOPLIST_KEY_CFBundleDisplayName':'我们','MARKETING_VERSION':'0.9.3','CURRENT_PROJECT_VERSION':'7','INFOPLIST_KEY_UIApplicationSceneManifest_Generation':'YES','ASSETCATALOG_COMPILER_APPICON_NAME':'AppIcon'})
+  if level=='app': settings.update({'INFOPLIST_KEY_CFBundleDisplayName':'我们','MARKETING_VERSION':'0.9.3','CURRENT_PROJECT_VERSION':'8','INFOPLIST_KEY_UIApplicationSceneManifest_Generation':'YES','ASSETCATALOG_COMPILER_APPICON_NAME':'AppIcon'})
   if level=='app': settings.update({'CODE_SIGN_ENTITLEMENTS':'CouplePrivateSpace.entitlements','APS_ENVIRONMENT':'development' if mode=='Debug' else 'production','PUSH_ENVIRONMENT':'sandbox' if mode=='Debug' else 'production','INFOPLIST_FILE':'PushInfo.plist'})
   if level=='test': settings['TEST_TARGET_NAME']='CouplePrivateSpace'
   encoded=' '.join(f'{k} = "{v}";' for k,v in settings.items())
