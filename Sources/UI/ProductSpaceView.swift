@@ -102,6 +102,7 @@ public struct ProductSpaceView: View {
     let saveSticker: (Data, String, Int, Int) async throws -> Void
     let saveVideo: (Data, String, Int, Int) async throws -> Void
     let saveMemoryWithPhoto: (MemoryContent, Data, Int, Int, UUID) async throws -> Void
+    let saveMemoryWithVideo: (MemoryContent, Data, String, Int, Int, UUID) async throws -> Void
     let loadPhoto: (UUID) async throws -> Data?
     let updateProfile: (String, (jpeg: Data, width: Int, height: Int)?, UUID?) async throws -> Void
     let privateCycle: CycleEntry?
@@ -214,6 +215,7 @@ public struct ProductSpaceView: View {
                 saveSticker: @escaping (Data, String, Int, Int) async throws -> Void,
                 saveVideo: @escaping (Data, String, Int, Int) async throws -> Void = { _, _, _, _ in },
                 saveMemoryWithPhoto: @escaping (MemoryContent, Data, Int, Int, UUID) async throws -> Void,
+                saveMemoryWithVideo: @escaping (MemoryContent, Data, String, Int, Int, UUID) async throws -> Void = { _, _, _, _, _, _ in },
                 loadPhoto: @escaping (UUID) async throws -> Data?,
                 retryMedia: @escaping (UUID) async -> Void = { _ in },
                 updateProfile: @escaping (String, (jpeg: Data, width: Int, height: Int)?, UUID?) async throws -> Void,
@@ -240,7 +242,7 @@ public struct ProductSpaceView: View {
         self.pairingCode = pairingCode; self.showPairingFinal = showPairingFinal; self.isCycleOwner = isCycleOwner
         self.deliveries = deliveries; self.save = save; self.cycle = cycle
         self.savePhoto = savePhoto; self.saveSticker = saveSticker; self.saveVideo = saveVideo
-        self.saveMemoryWithPhoto = saveMemoryWithPhoto; self.loadPhoto = loadPhoto
+        self.saveMemoryWithPhoto = saveMemoryWithPhoto; self.saveMemoryWithVideo = saveMemoryWithVideo; self.loadPhoto = loadPhoto
         self.updateProfile = updateProfile
         self.privateCycle = privateCycle
         self.configureReminders = configureReminders; self.reminderStatus = reminderStatus
@@ -343,7 +345,8 @@ public struct ProductSpaceView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: affection?.id)
         .sensoryFeedback(.impact(weight: .light), trigger: affection?.id) { _, next in affectionHaptics && next != nil }
         .sheet(item: $composing) { item in
-            ContentComposer(item: item, save: save, saveMemoryWithPhoto: saveMemoryWithPhoto)
+            ContentComposer(item: item, save: save, saveMemoryWithPhoto: saveMemoryWithPhoto,
+                            saveMemoryWithVideo: saveMemoryWithVideo)
         }
         .sheet(item: $editingCapsule) { value in
             CapsuleEditor(draft: value, saveDraft: saveCapsuleDraft, discard: discardCapsuleDraft,
@@ -476,11 +479,7 @@ public struct ProductSpaceView: View {
                         Text(record.value.date, style: .date).foregroundStyle(.secondary)
                         if !record.value.text.isEmpty { Text(record.value.text).textSelection(.enabled) }
                         if let mediaID = record.value.mediaID {
-                            PhotoBubble(id: mediaID, kind: "image/jpeg", load: loadPhoto, refresh: photoRefresh,
-                                        interrupted: interruptedMediaIDs.contains(mediaID),
-                                        progress: { await mediaProgress(mediaID) },
-                                        retry: { await retryMedia(mediaID) },
-                                        preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
+                            attachmentView(mediaID)
                         }
                         if record.value.sourceID != nil { Label("留自两个人的日常", systemImage: "link").foregroundStyle(.secondary) }
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(24)
@@ -516,17 +515,29 @@ public struct ProductSpaceView: View {
             Text("\(name(for: part.author))写下的").font(.caption).foregroundStyle(.secondary)
             if !part.value.text.isEmpty { Text(part.value.text).textSelection(.enabled).accessibilityIdentifier("capsule-content") }
             if let mediaID = part.value.mediaID {
-                PhotoBubble(id: mediaID, kind: "image/jpeg", load: loadPhoto, refresh: photoRefresh,
-                            interrupted: interruptedMediaIDs.contains(mediaID),
-                            progress: { await mediaProgress(mediaID) },
-                            retry: { await retryMedia(mediaID) },
-                            preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
+                attachmentView(mediaID)
             }
             Button("留作共同回忆") { rememberCapsule(part) }.buttonStyle(.bordered)
         } else {
             Label(state.journal.isCancelled(part) ? "这一份已取消封存" : "这一份尚未打开", systemImage: "lock").foregroundStyle(.secondary)
         }
     }
+
+    @ViewBuilder private func attachmentView(_ mediaID: UUID) -> some View {
+        let asset = state.media[mediaID]
+        if let manifest = asset?.manifest, manifest.kind.hasPrefix("video/") {
+            VideoBubble(id: mediaID, kind: manifest.kind, width: manifest.width, height: manifest.height,
+                        load: loadPhoto, refresh: photoRefresh,
+                        interrupted: interruptedMediaIDs.contains(mediaID),
+                        progress: { await mediaProgress(mediaID) }, retry: { await retryMedia(mediaID) })
+        } else {
+            PhotoBubble(id: mediaID, kind: manifestKind(asset), load: loadPhoto, refresh: photoRefresh,
+                        interrupted: interruptedMediaIDs.contains(mediaID),
+                        progress: { await mediaProgress(mediaID) }, retry: { await retryMedia(mediaID) },
+                        preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
+        }
+    }
+    private func manifestKind(_ asset: MediaAsset?) -> String { asset?.manifest.kind ?? "image/jpeg" }
 
     private var chatEntries: [ChatEntry] {
         let messages = state.messages.values.map { ChatEntry(id: $0.id, author: $0.author, version: $0.version, content: .text($0)) }
@@ -1501,6 +1512,7 @@ private struct ContentComposer: View {
     let item: Composer
     let save: (EventPayload, UUID) async throws -> Void
     let saveMemoryWithPhoto: (MemoryContent, Data, Int, Int, UUID) async throws -> Void
+    let saveMemoryWithVideo: (MemoryContent, Data, String, Int, Int, UUID) async throws -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var text = ""
@@ -1513,11 +1525,13 @@ private struct ContentComposer: View {
     @State private var objectID = UUID()
     @State private var selectedMemoryPhoto: PhotosPickerItem?
     @State private var importedPhoto: (jpeg: Data, width: Int, height: Int)?
+    @State private var selectedMemoryVideo: PhotosPickerItem?
+    @State private var importedVideo: (data: Data, kind: String, width: Int, height: Int)?
     @State private var photoLoading = false
     @State private var showingCamera = false
     private var needsTitle: Bool { switch item { case .memory: true; default: false } }
     private var allowsEmptyText: Bool {
-        if case .memory(let record) = item { return importedPhoto != nil || record?.value.mediaID != nil }
+        if case .memory(let record) = item { return importedPhoto != nil || importedVideo != nil || record?.value.mediaID != nil }
         return false
     }
     var body: some View {
@@ -1534,9 +1548,9 @@ private struct ContentComposer: View {
                 }
                 if case .memory = item { DatePicker("这一天", selection: $date, displayedComponents: .date) }
                 if case .memory(let record) = item {
-                    Section("照片（可选）") {
+                    Section("照片或短视频（可选）") {
                         if record?.value.mediaID != nil {
-                            Label("已附有照片，编辑会保留原照片", systemImage: "photo")
+                            Label("已有附件，编辑会保留原附件", systemImage: "paperclip")
                                 .foregroundStyle(.secondary)
                         } else {
                             HStack(spacing: 20) {
@@ -1546,11 +1560,20 @@ private struct ContentComposer: View {
                                     Label("从相册选择", systemImage: "photo.on.rectangle")
                                 }
                                 .buttonStyle(.bordered)
+                                PhotosPicker(selection: $selectedMemoryVideo, matching: .videos) {
+                                    Label("视频", systemImage: "video")
+                                }.buttonStyle(.bordered)
                             }
                             if let importedPhoto, let image = UIImage(data: importedPhoto.jpeg) {
                                 Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 180)
                                 Button("移除所选照片", role: .destructive) {
                                     self.importedPhoto = nil; selectedMemoryPhoto = nil
+                                }
+                            }
+                            if importedVideo != nil {
+                                Label("已选择短视频", systemImage: "video.fill")
+                                Button("移除所选视频", role: .destructive) {
+                                    importedVideo = nil; selectedMemoryVideo = nil
                                 }
                             }
                         }
@@ -1566,7 +1589,10 @@ private struct ContentComposer: View {
         }.tint(SpaceStyle.accent).interactiveDismissDisabled(saving)
             .sheet(isPresented: $showingCamera) {
                 CameraPicker { bytes in
-                    do { importedPhoto = try PhotoImport.prepare(bytes); error = nil }
+                    do {
+                        importedPhoto = try PhotoImport.prepare(bytes)
+                        importedVideo = nil; selectedMemoryVideo = nil; error = nil
+                    }
                     catch { self.error = "无法使用这张照片，请重试。" }
                 }
             }
@@ -1590,6 +1616,7 @@ private struct ContentComposer: View {
                             throw SpaceError.invalidInput
                         }
                         importedPhoto = try PhotoImport.prepare(bytes)
+                        importedVideo = nil; selectedMemoryVideo = nil
                         error = nil
                     } catch {
                         self.error = error as? SpaceError == .capacity
@@ -1598,10 +1625,29 @@ private struct ContentComposer: View {
                     }
                 }
             }
+            .onChange(of: selectedMemoryVideo) { _, selection in
+                guard let selection else { return }
+                photoLoading = true
+                Task {
+                    defer { photoLoading = false }
+                    do {
+                        guard let picked = try await selection.loadTransferable(type: PickedVideo.self) else { throw SpaceError.invalidInput }
+                        defer { try? FileManager.default.removeItem(at: picked.url) }
+                        let video = try await VideoImport.prepare(picked.url)
+                        let kind = selection.supportedContentTypes.contains(where: { $0.conforms(to: .mpeg4Movie) })
+                            ? "video/mp4" : "video/quicktime"
+                        importedVideo = (video.data, kind, video.width, video.height)
+                        importedPhoto = nil; selectedMemoryPhoto = nil; error = nil
+                    } catch {
+                        self.error = error as? SpaceError == .capacity ? "视频需在 30 秒、25 MB 以内。" : "无法读取这个视频，请重试。"
+                    }
+                }
+            }
     }
     private func persist() {
         let payload: EventPayload
         let photo = importedPhoto
+        let video = importedVideo
         var photoMemory: MemoryContent?
         switch item {
         case .wish: payload = .wishCreated(text: text)
@@ -1613,8 +1659,8 @@ private struct ContentComposer: View {
             let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
             let memory = MemoryContent(title: name.isEmpty ? (text.isEmpty ? "一起留下的照片" : "一起留下的一段话") : name,
                                        text: text, date: date,
-                                       sourceID: photo == nil ? record?.value.sourceID : objectID,
-                                       mediaID: photo == nil ? record?.value.mediaID : objectID)
+                                       sourceID: photo == nil && video == nil ? record?.value.sourceID : objectID,
+                                       mediaID: photo == nil && video == nil ? record?.value.mediaID : objectID)
             photoMemory = memory
             payload = .journal(.memory(memory))
         }
@@ -1623,6 +1669,8 @@ private struct ContentComposer: View {
             do {
                 if let photo, let photoMemory {
                     try await saveMemoryWithPhoto(photoMemory, photo.jpeg, photo.width, photo.height, objectID)
+                } else if let video, let photoMemory {
+                    try await saveMemoryWithVideo(photoMemory, video.data, video.kind, video.width, video.height, objectID)
                 } else {
                     try await save(payload, objectID)
                 }

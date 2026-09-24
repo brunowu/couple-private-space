@@ -175,6 +175,14 @@ import Vision
         await refresh()
         Task { await self.sync() }
     }
+    func saveMemoryWithVideo(_ memory: MemoryContent, data: Data, kind: String,
+                             width: Int, height: Int, id: UUID) async throws {
+        guard let client else { throw SpaceError.notPaired }
+        try await client.createMemoryWithVideo(memory, data: data, kind: kind,
+                                               width: width, height: height, id: id)
+        await refresh()
+        Task { await self.sync() }
+    }
     func photoData(_ id: UUID) async throws -> Data? {
         guard let client else { throw SpaceError.notPaired }
         return try await client.photoData(id)
@@ -680,6 +688,7 @@ public struct NetworkSpaceView: View {
                     save: { try await model.save($0, objectID: $1) }, privateCycle: model.privateCycle, cycle: model.cycle,
                     savePhoto: model.savePhoto, saveSticker: model.saveSticker, saveVideo: model.saveVideo,
                     saveMemoryWithPhoto: model.saveMemoryWithPhoto,
+                    saveMemoryWithVideo: model.saveMemoryWithVideo,
                     loadPhoto: model.photoData,
                     retryMedia: model.retryMedia,
                     updateProfile: model.updateProfile,

@@ -554,6 +554,12 @@ public actor NetworkPair {
                                                width: width, height: height,
                                                objectID: id, destination: .memory)
     }
+    public func createMemoryWithVideo(_ memory: MemoryContent, data: Data, kind: String,
+                                      width: Int, height: Int, id: UUID) async throws {
+        _ = try await client().createWithMedia(.journal(.memory(memory)), data: data, kind: kind,
+                                               width: width, height: height,
+                                               objectID: id, destination: .memory)
+    }
     public func updateProfile(name: String, avatar: (jpeg: Data, width: Int, height: Int)?,
                               retainedAvatarID: UUID?) async throws {
         try await client().updateProfile(name: name, avatar: avatar, retainedAvatarID: retainedAvatarID)

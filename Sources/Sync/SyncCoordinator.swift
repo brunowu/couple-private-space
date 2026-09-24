@@ -81,14 +81,21 @@ public actor SyncCoordinator {
                                                      width: Int, height: Int, objectID: UUID,
                                                      destination: MediaDestination,
                                                      now: Date = Date()) throws -> DomainEvent {
+        try createWithMedia(payload, data: jpeg, kind: "image/jpeg", width: width, height: height,
+                            objectID: objectID, destination: destination, now: now)
+    }
+    @discardableResult public func createWithMedia(_ payload: EventPayload, data: Data, kind: String,
+                                                    width: Int, height: Int, objectID: UUID,
+                                                    destination: MediaDestination,
+                                                    now: Date = Date()) throws -> DomainEvent {
         switch (payload, destination) {
         case (.journal(.memory(let memory)), .memory) where memory.mediaID == objectID: break
         case (.journal(.sealCapsule(let capsule)), .capsule) where capsule.mediaID == objectID: break
         case (.profile(let profile), .avatar) where profile.avatarID == objectID: break
         default: throw SpaceError.invalidInput
         }
-        let (manifest, sealed) = try preparePhoto(jpeg, width: width, height: height,
-                                                   destination: destination)
+        let (manifest, sealed) = try prepareMedia(data, kind: kind, width: width, height: height,
+                                                  destination: destination)
         return try db.transaction {
             guard try db.read("mediaBlobs", key: objectID.uuidString) == nil else { throw SpaceError.conflict }
             try db.write("mediaBlobs", key: objectID.uuidString, value: sealed)
@@ -101,6 +108,10 @@ public actor SyncCoordinator {
         let payload = EventPayload.journal(.sealCapsule(draft.content))
         if let jpeg = draft.photoJPEG, let width = draft.photoWidth, let height = draft.photoHeight {
             _ = try createWithPhoto(payload, jpeg: jpeg, width: width, height: height,
+                                    objectID: draft.id, destination: .capsule, now: now)
+        } else if let data = draft.videoData, let kind = draft.videoKind,
+                  let width = draft.videoWidth, let height = draft.videoHeight {
+            _ = try createWithMedia(payload, data: data, kind: kind, width: width, height: height,
                                     objectID: draft.id, destination: .capsule, now: now)
         } else {
             _ = try create(payload, objectID: draft.id, now: now)
