@@ -548,6 +548,9 @@ public actor NetworkPair {
     public func createVideo(_ data: Data, kind: String, width: Int, height: Int) async throws {
         _ = try await client().createSticker(data, kind: kind, width: width, height: height)
     }
+    public func createAudio(_ data: Data) async throws {
+        _ = try await client().createSticker(data, kind: "audio/mp4", width: 1, height: 1)
+    }
     public func createMemoryWithPhoto(_ memory: MemoryContent, jpeg: Data,
                                       width: Int, height: Int, id: UUID) async throws {
         _ = try await client().createWithPhoto(.journal(.memory(memory)), jpeg: jpeg,

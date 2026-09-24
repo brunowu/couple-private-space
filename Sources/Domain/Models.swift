@@ -163,7 +163,7 @@ public struct MediaManifest: Codable, Equatable, Sendable {
     }
     public func validate() throws {
         let maximum = kind.hasPrefix("video/") ? 25 * 1024 * 1024 : (kind == "image/jpeg" ? 2_000_000 : 10 * 1024 * 1024)
-        guard ["image/jpeg", "image/png", "image/gif", "video/quicktime", "video/mp4"].contains(kind),
+        guard ["image/jpeg", "image/png", "image/gif", "video/quicktime", "video/mp4", "audio/mp4"].contains(kind),
               (1...maximum).contains(byteCount),
               (1...4_096).contains(width), (1...4_096).contains(height),
               sha256.count == 32, fileKey.count == 32 else { throw SpaceError.invalidInput }

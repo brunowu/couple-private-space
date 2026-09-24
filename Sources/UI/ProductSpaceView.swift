@@ -101,6 +101,7 @@ public struct ProductSpaceView: View {
     let savePhoto: (Data, Int, Int) async throws -> Void
     let saveSticker: (Data, String, Int, Int) async throws -> Void
     let saveVideo: (Data, String, Int, Int) async throws -> Void
+    let saveAudio: (Data) async throws -> Void
     let saveMemoryWithPhoto: (MemoryContent, Data, Int, Int, UUID) async throws -> Void
     let saveMemoryWithVideo: (MemoryContent, Data, String, Int, Int, UUID) async throws -> Void
     let loadPhoto: (UUID) async throws -> Data?
@@ -164,6 +165,7 @@ public struct ProductSpaceView: View {
     @State private var selectedChatPhotos: [PhotosPickerItem] = []
     @State private var selectedChatVideo: PhotosPickerItem?
     @State private var showingChatCamera = false
+    @State private var showingAudioRecorder = false
     @State private var showingStickerLibrary = false
     @StateObject private var stickerLibrary = StickerLibrary()
     @State private var stickerSmokeStarted = false
@@ -214,6 +216,7 @@ public struct ProductSpaceView: View {
                 savePhoto: @escaping (Data, Int, Int) async throws -> Void,
                 saveSticker: @escaping (Data, String, Int, Int) async throws -> Void,
                 saveVideo: @escaping (Data, String, Int, Int) async throws -> Void = { _, _, _, _ in },
+                saveAudio: @escaping (Data) async throws -> Void = { _ in },
                 saveMemoryWithPhoto: @escaping (MemoryContent, Data, Int, Int, UUID) async throws -> Void,
                 saveMemoryWithVideo: @escaping (MemoryContent, Data, String, Int, Int, UUID) async throws -> Void = { _, _, _, _, _, _ in },
                 loadPhoto: @escaping (UUID) async throws -> Data?,
@@ -241,7 +244,7 @@ public struct ProductSpaceView: View {
         self.state = state; self.localID = localID; self.peerDeviceID = peerDeviceID
         self.pairingCode = pairingCode; self.showPairingFinal = showPairingFinal; self.isCycleOwner = isCycleOwner
         self.deliveries = deliveries; self.save = save; self.cycle = cycle
-        self.savePhoto = savePhoto; self.saveSticker = saveSticker; self.saveVideo = saveVideo
+        self.savePhoto = savePhoto; self.saveSticker = saveSticker; self.saveVideo = saveVideo; self.saveAudio = saveAudio
         self.saveMemoryWithPhoto = saveMemoryWithPhoto; self.saveMemoryWithVideo = saveMemoryWithVideo; self.loadPhoto = loadPhoto
         self.updateProfile = updateProfile
         self.privateCycle = privateCycle
@@ -381,6 +384,9 @@ public struct ProductSpaceView: View {
         }
         .sheet(isPresented: $showingChatCamera) {
             CameraPicker { data in Task { await sendCapturedPhoto(data) } }
+        }
+        .sheet(isPresented: $showingAudioRecorder) {
+            AudioRecorderSheet { data in try await saveAudio(data) }
         }
         .sheet(isPresented: $showingStickerLibrary) {
             StickerLibraryView(library: stickerLibrary) { sticker in
@@ -550,7 +556,7 @@ public struct ProductSpaceView: View {
     }
     private var chatPhotoIDs: [UUID] {
         chatEntries.compactMap { entry in
-            if case .photo(let asset) = entry.content, !asset.manifest.kind.hasPrefix("video/") { return asset.id }
+            if case .photo(let asset) = entry.content, asset.manifest.kind.hasPrefix("image/") { return asset.id }
             return nil
         }
     }
@@ -595,7 +601,9 @@ public struct ProductSpaceView: View {
                 } else if value.replyTo != nil {
                     content = "↩︎ 回复一条暂不可用的消息\n\(body)"
                 } else { content = body }
-            case .photo(let asset): content = asset.manifest.kind.hasPrefix("video/") ? "[视频]" : "[照片]"
+            case .photo(let asset):
+                content = asset.manifest.kind.hasPrefix("video/") ? "[视频]"
+                    : asset.manifest.kind.hasPrefix("audio/") ? "[语音]" : "[照片]"
             }
             return "[\(time)] \(name(for: entry.author))：\(content)"
         }.joined(separator: "\n\n")
@@ -884,7 +892,13 @@ public struct ProductSpaceView: View {
                                                 }
                                         }
                                     case .photo(let asset):
-                                        if asset.manifest.kind.hasPrefix("video/") {
+                                        if asset.manifest.kind.hasPrefix("audio/") {
+                                            AudioBubble(id: asset.id, load: loadPhoto, refresh: photoRefresh,
+                                                        interrupted: interruptedMediaIDs.contains(asset.id),
+                                                        progress: { await mediaProgress(asset.id) },
+                                                        retry: { await retryMedia(asset.id) })
+                                                .contextMenu { reactionMenu(targetID: asset.id) }
+                                        } else if asset.manifest.kind.hasPrefix("video/") {
                                             VideoBubble(id: asset.id, kind: asset.manifest.kind,
                                                         width: asset.manifest.width, height: asset.manifest.height,
                                                         load: loadPhoto, refresh: photoRefresh,
@@ -1007,7 +1021,12 @@ public struct ProductSpaceView: View {
                         .padding(14).background(card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(SpaceStyle.border, lineWidth: 1))
                         .accessibilityIdentifier("message-draft")
-                    Button {
+                    if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Button { chatFocused = false; showingAudioRecorder = true } label: {
+                            Image(systemName: "mic.fill").font(.headline).foregroundStyle(.white)
+                                .frame(width: 46, height: 46).background(SpaceStyle.accent, in: Circle())
+                        }.disabled(sending).accessibilityLabel("录制语音")
+                    } else { Button {
                     let raw = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                     let payload: EventPayload = quotedMessage.map {
                         .messageV2(MessageContent(text: raw, replyTo: $0.id))
@@ -1019,8 +1038,9 @@ public struct ProductSpaceView: View {
                         sending = false
                     }
                     } label: { Image(systemName: "arrow.up").font(.headline).foregroundStyle(.white).frame(width: 46, height: 46).background(SpaceStyle.accent, in: Circle()) }
-                        .disabled(sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("发送")
-                        .opacity(sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
+                        .disabled(sending).accessibilityLabel("发送")
+                        .opacity(sending ? 0.45 : 1)
+                    }
                 }
             }.padding(16)
         }.background(paper)
