@@ -27,6 +27,7 @@ import Vision
     @Published var inviteExpiry: Date?
     @Published var peerDeviceID: UUID?
     @Published var deliveries: [UUID: DeliveryState] = [:]
+    @Published var interruptedMediaIDs: Set<UUID> = []
     @Published var reminderStatus = "愿望提醒尚未开启。"
     @Published var affection: Affection?
     @Published var capsuleDrafts: [CapsuleDraft] = []
@@ -115,6 +116,7 @@ import Vision
             do {
                 state = try await client.state(); pending = try await client.pendingCount()
                 deliveries = try await client.deliveries()
+                interruptedMediaIDs = try await client.interruptedMediaIDs()
                 capsuleDrafts = try await client.capsuleDrafts()
                 privateCycle = try await client.privateCycle()
                 openedCapsules = try await client.openedCapsules()
@@ -168,6 +170,11 @@ import Vision
     func photoData(_ id: UUID) async throws -> Data? {
         guard let client else { throw SpaceError.notPaired }
         return try await client.photoData(id)
+    }
+    func retryMedia(_ id: UUID) async {
+        do { try await client?.retryMedia(id); lastSync = Date(); error = nil }
+        catch { self.error = error.localizedDescription }
+        await refresh()
     }
     func createEncryptedBackup() async throws -> SpaceBackupArtifact {
         guard let client else { throw SpaceError.notPaired }
@@ -656,10 +663,12 @@ public struct NetworkSpaceView: View {
                     deliveries: model.deliveries, reminderStatus: model.reminderStatus,
                     syncStatus: !model.online ? "离线 · 内容保存在本机" : model.error != nil ? "暂未连接 · 等待重试" : model.lastSync == nil ? "等待同步" : "已连接 · 待回执 \(model.pending)",
                     photoRefresh: model.lastSync,
+                    interruptedMediaIDs: model.interruptedMediaIDs,
                     save: { try await model.save($0, objectID: $1) }, privateCycle: model.privateCycle, cycle: model.cycle,
                     savePhoto: model.savePhoto, saveSticker: model.saveSticker,
                     saveMemoryWithPhoto: model.saveMemoryWithPhoto,
                     loadPhoto: model.photoData,
+                    retryMedia: model.retryMedia,
                     updateProfile: model.updateProfile,
                     configureReminders: { try await model.configureReminders(enabled: $0, days: $1, quiet: $2) }, retry: model.sync,
                     affection: model.affection, sendAffection: model.sendAffection,

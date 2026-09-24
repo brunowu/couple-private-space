@@ -108,6 +108,8 @@ public struct ProductSpaceView: View {
     let reminderStatus: String
     let syncStatus: String
     let photoRefresh: Date?
+    let interruptedMediaIDs: Set<UUID>
+    let retryMedia: (UUID) async -> Void
     let retry: () async -> Void
     let affection: Affection?
     let sendAffection: (AffectionKind) async throws -> Bool
@@ -200,12 +202,14 @@ public struct ProductSpaceView: View {
                 showPairingFinal: (() -> Void)? = nil, isCycleOwner: Bool,
                 deliveries: [UUID: DeliveryState], reminderStatus: String, syncStatus: String,
                 photoRefresh: Date?,
+                interruptedMediaIDs: Set<UUID> = [],
                 save: @escaping (EventPayload, UUID) async throws -> Void,
                 privateCycle: CycleEntry?, cycle: @escaping (CycleEntry) async throws -> Void,
                 savePhoto: @escaping (Data, Int, Int) async throws -> Void,
                 saveSticker: @escaping (Data, String, Int, Int) async throws -> Void,
                 saveMemoryWithPhoto: @escaping (MemoryContent, Data, Int, Int, UUID) async throws -> Void,
                 loadPhoto: @escaping (UUID) async throws -> Data?,
+                retryMedia: @escaping (UUID) async -> Void = { _ in },
                 updateProfile: @escaping (String, (jpeg: Data, width: Int, height: Int)?, UUID?) async throws -> Void,
                 configureReminders: @escaping (Bool, Int, QuietHours) async throws -> Void,
                 retry: @escaping () async -> Void, affection: Affection?,
@@ -235,6 +239,7 @@ public struct ProductSpaceView: View {
         self.privateCycle = privateCycle
         self.configureReminders = configureReminders; self.reminderStatus = reminderStatus
         self.syncStatus = syncStatus; self.photoRefresh = photoRefresh; self.retry = retry
+        self.interruptedMediaIDs = interruptedMediaIDs; self.retryMedia = retryMedia
         self.affection = affection; self.sendAffection = sendAffection
         self.capsuleDrafts = capsuleDrafts; self.openedCapsules = openedCapsules
         self.saveCapsuleDraft = saveCapsuleDraft; self.sealCapsuleDraft = sealCapsuleDraft
@@ -462,6 +467,8 @@ public struct ProductSpaceView: View {
                         if !record.value.text.isEmpty { Text(record.value.text).textSelection(.enabled) }
                         if let mediaID = record.value.mediaID {
                             PhotoBubble(id: mediaID, kind: "image/jpeg", load: loadPhoto, refresh: photoRefresh,
+                                        interrupted: interruptedMediaIDs.contains(mediaID),
+                                        retry: { await retryMedia(mediaID) },
                                         preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
                         }
                         if record.value.sourceID != nil { Label("留自两个人的日常", systemImage: "link").foregroundStyle(.secondary) }
@@ -499,6 +506,8 @@ public struct ProductSpaceView: View {
             if !part.value.text.isEmpty { Text(part.value.text).textSelection(.enabled).accessibilityIdentifier("capsule-content") }
             if let mediaID = part.value.mediaID {
                 PhotoBubble(id: mediaID, kind: "image/jpeg", load: loadPhoto, refresh: photoRefresh,
+                            interrupted: interruptedMediaIDs.contains(mediaID),
+                            retry: { await retryMedia(mediaID) },
                             preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
             }
             Button("留作共同回忆") { rememberCapsule(part) }.buttonStyle(.bordered)
@@ -838,6 +847,8 @@ public struct ProductSpaceView: View {
                                     case .photo(let asset):
                                         PhotoBubble(id: asset.id, kind: asset.manifest.kind,
                                                     load: loadPhoto, refresh: photoRefresh,
+                                                    interrupted: interruptedMediaIDs.contains(asset.id),
+                                                    retry: { await retryMedia(asset.id) },
                                                     preview: {
                                                         photoPreview = PhotoPreview(photoIDs: chatPhotoIDs,
                                                                                     selectedID: asset.id,
@@ -1056,6 +1067,8 @@ public struct ProductSpaceView: View {
                             }.buttonStyle(.plain)
                             if let mediaID = record.value.mediaID {
                                 PhotoBubble(id: mediaID, kind: "image/jpeg", load: loadPhoto, refresh: photoRefresh,
+                                            interrupted: interruptedMediaIDs.contains(mediaID),
+                                            retry: { await retryMedia(mediaID) },
                                             preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
                             }
                             Menu("整理回忆") {
@@ -1582,6 +1595,8 @@ private struct PhotoBubble: View {
     let kind: String
     let load: (UUID) async throws -> Data?
     let refresh: Date?
+    var interrupted = false
+    var retry: () async -> Void = {}
     let preview: (UIImage) -> Void
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1589,6 +1604,10 @@ private struct PhotoBubble: View {
     @State private var jpeg: Data?
     @State private var saveStatus: String?
     @State private var isVisible = true
+    @State private var timedOut = false
+    @State private var retryNonce = 0
+
+    private var showsRetry: Bool { interrupted || timedOut }
 
     var body: some View {
         Group {
@@ -1621,20 +1640,36 @@ private struct PhotoBubble: View {
                     }.accessibilityLabel("保存到相册").padding(8)
                 }
             } else {
-                Label("等待安全传输", systemImage: "photo.badge.arrow.down")
-                    .font(.subheadline).foregroundStyle(.secondary)
-                    .frame(width: 210, height: 140)
-                    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
-                    .accessibilityIdentifier("photo-awaiting-transfer")
+                VStack(spacing: 10) {
+                    Label(showsRetry ? "传输暂时中断" : "正在安全传输", systemImage: "photo.badge.arrow.down")
+                    if showsRetry {
+                        Button("重试") {
+                            timedOut = false
+                            retryNonce += 1
+                            Task { await retry() }
+                        }
+                            .buttonStyle(.bordered).controlSize(.small)
+                    }
+                }
+                .font(.subheadline).foregroundStyle(.secondary)
+                .frame(width: 210, height: 140)
+                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
+                .accessibilityIdentifier("photo-awaiting-transfer")
             }
         }
         .onScrollVisibilityChange(threshold: 0.05) { isVisible = $0 }
-        .task(id: "\(scenePhase)-\(refresh?.timeIntervalSince1970 ?? 0)") {
+        .task(id: "\(scenePhase)-\(refresh?.timeIntervalSince1970 ?? 0)-\(retryNonce)") {
             // Rotation and system overlays can briefly make the scene inactive. Keep the
             // decoded photo alive so an open full-screen viewer is not torn down.
             guard scenePhase == .active else { return }
-            jpeg = try? await load(id)
-            image = jpeg.flatMap(UIImage.init(data:))
+            for attempt in 0..<8 {
+                jpeg = try? await load(id)
+                image = jpeg.flatMap(UIImage.init(data:))
+                if image != nil || attempt == 7 { break }
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled, scenePhase == .active else { break }
+            }
+            if image == nil, scenePhase == .active { timedOut = true }
         }
         .alert("照片", isPresented: Binding(get: { saveStatus != nil }, set: { if !$0 { saveStatus = nil } })) {
             Button("好") { saveStatus = nil }

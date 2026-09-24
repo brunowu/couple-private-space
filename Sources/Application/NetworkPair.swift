@@ -55,6 +55,10 @@ private struct PairSetup: Codable {
     var response: String?
     var final: String?
 }
+private struct MediaRetryRecord: Codable {
+    var attempts: Int
+    var nextAttempt: Date
+}
 
 public enum PairingVerification {
     /// Both phones derive the same 64-bit display code from their Signal identities and this space.
@@ -79,6 +83,7 @@ public actor NetworkPair {
     private var relay: HTTPRelay?
     private var coordinator: SyncCoordinator?
     private var mediaSocket: URLSessionWebSocketTask?
+    private var mediaRetryTask: Task<Void, Never>?
     private var busy = false
     public init(directory: URL, vault: any KeyVault) throws {
         self.vault = vault
@@ -339,13 +344,50 @@ public actor NetworkPair {
         // a live socket and are never added to the server's durable storage.
         do {
             try await ensureMediaSocket()
-            for id in try await client.missingPeerPhotoIDs() {
-                try await mediaSocket?.send(.string("need:\(id.uuidString)"))
+            let now = Date()
+            let missing = Set(try await client.missingPeerPhotoIDs())
+            for (key, _) in try db.entries("mediaRetry") where UUID(uuidString: key).map({ !missing.contains($0) }) ?? true {
+                try db.remove("mediaRetry", key: key)
             }
+            var nextRetry: Date?
+            for id in missing {
+                let record = try db.decode(MediaRetryRecord.self, table: "mediaRetry", key: id.uuidString)
+                if let record, record.nextAttempt > now {
+                    nextRetry = min(nextRetry ?? record.nextAttempt, record.nextAttempt)
+                    continue
+                }
+                try await mediaSocket?.send(.string("need:\(id.uuidString)"))
+                let attempts = min((record?.attempts ?? 0) + 1, 20)
+                let delays: [TimeInterval] = [3, 8, 20, 45, 90]
+                let due = now.addingTimeInterval(delays[min(attempts - 1, delays.count - 1)])
+                try db.encode(MediaRetryRecord(attempts: attempts, nextAttempt: due),
+                              table: "mediaRetry", key: id.uuidString)
+                nextRetry = min(nextRetry ?? due, due)
+            }
+            scheduleMediaRetry(at: nextRetry)
         } catch {
+            let due = Date().addingTimeInterval(5)
+            if let missing = try? await client.missingPeerPhotoIDs() {
+                for id in missing {
+                    let old = try? db.decode(MediaRetryRecord.self, table: "mediaRetry", key: id.uuidString)
+                    try? db.encode(MediaRetryRecord(attempts: min((old?.attempts ?? 0) + 1, 20), nextAttempt: due),
+                                   table: "mediaRetry", key: id.uuidString)
+                }
+            }
             mediaSocket?.cancel(with: .goingAway, reason: nil)
             mediaSocket = nil
+            scheduleMediaRetry(at: due)
             // Text synchronization remains available when the live media channel is offline.
+        }
+    }
+    private func scheduleMediaRetry(at date: Date?) {
+        mediaRetryTask?.cancel()
+        guard let date else { mediaRetryTask = nil; return }
+        let delay = max(0.5, date.timeIntervalSinceNow)
+        mediaRetryTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            try? await self?.synchronize()
         }
     }
     private func ensureMediaSocket() async throws {
@@ -372,6 +414,7 @@ public actor NetworkPair {
                           header.hasPrefix("photo:"), header.hasSuffix(":"),
                           let id = UUID(uuidString: String(header.dropFirst(6).dropLast())) else { continue }
                     try await client().receivePhotoCiphertext(Data(frame.dropFirst(43)), id: id)
+                    try db.remove("mediaRetry", key: id.uuidString)
                     try await client().sync(using: relay!)
                 @unknown default: break
                 }
@@ -416,6 +459,21 @@ public actor NetworkPair {
         try await client().updateProfile(name: name, avatar: avatar, retainedAvatarID: retainedAvatarID)
     }
     public func photoData(_ id: UUID) async throws -> Data? { try await client().photoData(id) }
+    public func interruptedMediaIDs() async throws -> Set<UUID> {
+        let missing = Set(try await client().missingPeerPhotoIDs())
+        return try Set(db.entries("mediaRetry").compactMap { key, data in
+            guard let id = UUID(uuidString: key), missing.contains(id),
+                  try JSONDecoder().decode(MediaRetryRecord.self, from: data).attempts >= 2 else { return nil }
+            return id
+        })
+    }
+    public func retryMedia(_ id: UUID) async throws {
+        guard try await client().missingPeerPhotoIDs().contains(id) else { return }
+        try db.remove("mediaRetry", key: id.uuidString)
+        mediaSocket?.cancel(with: .goingAway, reason: nil)
+        mediaSocket = nil
+        try await synchronize()
+    }
     public func pendingCount() async throws -> Int { try await client().unconfirmedEventCount() }
     public func sendAffection(_ kind: AffectionKind) async throws -> Bool { try await client().sendAffection(kind) }
     public func respondToAffection(_ id: UUID) async throws -> Bool { try await client().respondToAffection(envelopeID: id) }
