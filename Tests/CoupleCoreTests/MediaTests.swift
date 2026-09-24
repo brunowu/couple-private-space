@@ -101,7 +101,7 @@ import Sync
     #expect(try await c.b.photoData(draft.id) == jpeg)
 }
 
-@Test func videoAttachmentsUseTheExistingEncryptedMemoryAndCapsulePipeline() async throws {
+@Test func audioAndVideoAttachmentsUseTheExistingEncryptedMediaPipeline() async throws {
     let c = try Clients(); defer { try? FileManager.default.removeItem(at: c.dir) }
     let video = Data(repeating: 0x5a, count: 4_096)
     let memoryID = UUID()
@@ -117,6 +117,10 @@ import Sync
     #expect(try await c.a.state().media[draft.id]?.destination == .capsule)
     #expect(try await c.a.photoData(memoryID) == video)
     #expect(try await c.a.photoData(draft.id) == video)
+    let audio = Data(repeating: 0x33, count: 2_048)
+    let audioEvent = try await c.a.createSticker(audio, kind: "audio/mp4", width: 1, height: 1)
+    #expect(try await c.a.state().media[audioEvent.objectID]?.manifest.kind == "audio/mp4")
+    #expect(try await c.a.photoData(audioEvent.objectID) == audio)
 }
 
 @Test func namesAndAvatarsSyncAsEncryptedProfilesWithoutChatArtifacts() async throws {

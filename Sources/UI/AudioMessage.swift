@@ -8,6 +8,7 @@ struct AudioRecorderSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var recorder: AVAudioRecorder?
     @State private var preview: AVAudioPlayer?
+    @State private var previewPlaying = false
     @State private var fileURL: URL?
     @State private var elapsed = 0.0
     @State private var recording = false
@@ -30,7 +31,7 @@ struct AudioRecorderSheet: View {
                     } else if recording {
                         Button("停止", systemImage: "stop.fill") { stop() }.buttonStyle(.borderedProminent)
                     } else {
-                        Button(preview?.isPlaying == true ? "暂停" : "试听", systemImage: "play.fill") { togglePreview() }
+                        Button(previewPlaying ? "暂停" : "试听", systemImage: previewPlaying ? "pause.fill" : "play.fill") { togglePreview() }
                             .buttonStyle(.bordered)
                         Button("重录", role: .destructive) { reset() }.buttonStyle(.bordered)
                         Button("发送", systemImage: "arrow.up.circle.fill") { sendRecording() }
@@ -49,6 +50,12 @@ struct AudioRecorderSheet: View {
                 elapsed = recorder?.currentTime ?? elapsed
                 if elapsed >= 60 { stop(); break }
                 try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
+        .task(id: previewPlaying) {
+            while previewPlaying {
+                try? await Task.sleep(for: .milliseconds(200))
+                if preview?.isPlaying != true { previewPlaying = false }
             }
         }
         .onDisappear { recorder?.stop(); preview?.stop(); cleanup() }
@@ -73,13 +80,14 @@ struct AudioRecorderSheet: View {
         } catch { self.error = "无法开始录音，请重试。" }
     }
     private func stop() {
-        recorder?.stop(); elapsed = recorder?.currentTime ?? elapsed; recorder = nil; recording = false
+        let duration = recorder?.currentTime
+        recorder?.stop(); elapsed = duration ?? elapsed; recorder = nil; recording = false
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
     private func togglePreview() {
-        if preview?.isPlaying == true { preview?.pause(); return }
+        if previewPlaying { preview?.pause(); previewPlaying = false; return }
         guard let fileURL else { return }
-        do { preview = try AVAudioPlayer(contentsOf: fileURL); preview?.play() }
+        do { preview = try AVAudioPlayer(contentsOf: fileURL); previewPlaying = preview?.play() == true }
         catch { self.error = "暂时无法试听。" }
     }
     private func sendRecording() {
@@ -94,7 +102,7 @@ struct AudioRecorderSheet: View {
             } catch { self.error = "语音发送失败，录音仍然保留。" }
         }
     }
-    private func reset() { preview?.stop(); preview = nil; cleanup(); elapsed = 0; error = nil }
+    private func reset() { preview?.stop(); preview = nil; previewPlaying = false; cleanup(); elapsed = 0; error = nil }
     private func cleanup() { if let fileURL { try? FileManager.default.removeItem(at: fileURL) }; fileURL = nil }
     private func format(_ seconds: TimeInterval) -> String { String(format: "%d:%02d", Int(seconds) / 60, Int(seconds) % 60) }
 }
