@@ -28,6 +28,7 @@ import Vision
     @Published var peerDeviceID: UUID?
     @Published var deliveries: [UUID: DeliveryState] = [:]
     @Published var interruptedMediaIDs: Set<UUID> = []
+    @Published var mediaProgress: [UUID: Double] = [:]
     @Published var reminderStatus = "愿望提醒尚未开启。"
     @Published var affection: Affection?
     @Published var capsuleDrafts: [CapsuleDraft] = []
@@ -117,6 +118,7 @@ import Vision
                 state = try await client.state(); pending = try await client.pendingCount()
                 deliveries = try await client.deliveries()
                 interruptedMediaIDs = try await client.interruptedMediaIDs()
+                mediaProgress = try await client.mediaProgress()
                 capsuleDrafts = try await client.capsuleDrafts()
                 privateCycle = try await client.privateCycle()
                 openedCapsules = try await client.openedCapsules()
@@ -175,6 +177,10 @@ import Vision
         do { try await client?.retryMedia(id); lastSync = Date(); error = nil }
         catch { self.error = error.localizedDescription }
         await refresh()
+    }
+    func mediaTransferProgress(_ id: UUID) async -> Double? {
+        guard let client else { return nil }
+        return try? await client.mediaProgress()[id]
     }
     func createEncryptedBackup() async throws -> SpaceBackupArtifact {
         guard let client else { throw SpaceError.notPaired }
@@ -664,6 +670,7 @@ public struct NetworkSpaceView: View {
                     syncStatus: !model.online ? "离线 · 内容保存在本机" : model.error != nil ? "暂未连接 · 等待重试" : model.lastSync == nil ? "等待同步" : "已连接 · 待回执 \(model.pending)",
                     photoRefresh: model.lastSync,
                     interruptedMediaIDs: model.interruptedMediaIDs,
+                    mediaProgress: model.mediaTransferProgress,
                     save: { try await model.save($0, objectID: $1) }, privateCycle: model.privateCycle, cycle: model.cycle,
                     savePhoto: model.savePhoto, saveSticker: model.saveSticker,
                     saveMemoryWithPhoto: model.saveMemoryWithPhoto,

@@ -84,7 +84,7 @@ public actor HTTPRelay: RelayTransport {
         socketRequest.setValue(try key.signature(for: signed).rawRepresentation.base64EncodedString(),
                                forHTTPHeaderField: "X-Signature")
         let task = session.webSocketTask(with: socketRequest)
-        task.maximumMessageSize = 2_001_000
+        task.maximumMessageSize = 2_001_000 // Receives legacy whole frames and new 256 KiB chunks.
         task.resume()
         return task
     }

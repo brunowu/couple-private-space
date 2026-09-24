@@ -109,6 +109,7 @@ public struct ProductSpaceView: View {
     let syncStatus: String
     let photoRefresh: Date?
     let interruptedMediaIDs: Set<UUID>
+    let mediaProgress: (UUID) async -> Double?
     let retryMedia: (UUID) async -> Void
     let retry: () async -> Void
     let affection: Affection?
@@ -203,6 +204,7 @@ public struct ProductSpaceView: View {
                 deliveries: [UUID: DeliveryState], reminderStatus: String, syncStatus: String,
                 photoRefresh: Date?,
                 interruptedMediaIDs: Set<UUID> = [],
+                mediaProgress: @escaping (UUID) async -> Double? = { _ in nil },
                 save: @escaping (EventPayload, UUID) async throws -> Void,
                 privateCycle: CycleEntry?, cycle: @escaping (CycleEntry) async throws -> Void,
                 savePhoto: @escaping (Data, Int, Int) async throws -> Void,
@@ -240,6 +242,7 @@ public struct ProductSpaceView: View {
         self.configureReminders = configureReminders; self.reminderStatus = reminderStatus
         self.syncStatus = syncStatus; self.photoRefresh = photoRefresh; self.retry = retry
         self.interruptedMediaIDs = interruptedMediaIDs; self.retryMedia = retryMedia
+        self.mediaProgress = mediaProgress
         self.affection = affection; self.sendAffection = sendAffection
         self.capsuleDrafts = capsuleDrafts; self.openedCapsules = openedCapsules
         self.saveCapsuleDraft = saveCapsuleDraft; self.sealCapsuleDraft = sealCapsuleDraft
@@ -468,6 +471,7 @@ public struct ProductSpaceView: View {
                         if let mediaID = record.value.mediaID {
                             PhotoBubble(id: mediaID, kind: "image/jpeg", load: loadPhoto, refresh: photoRefresh,
                                         interrupted: interruptedMediaIDs.contains(mediaID),
+                                        progress: { await mediaProgress(mediaID) },
                                         retry: { await retryMedia(mediaID) },
                                         preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
                         }
@@ -507,6 +511,7 @@ public struct ProductSpaceView: View {
             if let mediaID = part.value.mediaID {
                 PhotoBubble(id: mediaID, kind: "image/jpeg", load: loadPhoto, refresh: photoRefresh,
                             interrupted: interruptedMediaIDs.contains(mediaID),
+                            progress: { await mediaProgress(mediaID) },
                             retry: { await retryMedia(mediaID) },
                             preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
             }
@@ -848,6 +853,7 @@ public struct ProductSpaceView: View {
                                         PhotoBubble(id: asset.id, kind: asset.manifest.kind,
                                                     load: loadPhoto, refresh: photoRefresh,
                                                     interrupted: interruptedMediaIDs.contains(asset.id),
+                                                    progress: { await mediaProgress(asset.id) },
                                                     retry: { await retryMedia(asset.id) },
                                                     preview: {
                                                         photoPreview = PhotoPreview(photoIDs: chatPhotoIDs,
@@ -1068,6 +1074,7 @@ public struct ProductSpaceView: View {
                             if let mediaID = record.value.mediaID {
                                 PhotoBubble(id: mediaID, kind: "image/jpeg", load: loadPhoto, refresh: photoRefresh,
                                             interrupted: interruptedMediaIDs.contains(mediaID),
+                                            progress: { await mediaProgress(mediaID) },
                                             retry: { await retryMedia(mediaID) },
                                             preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
                             }
@@ -1596,6 +1603,7 @@ private struct PhotoBubble: View {
     let load: (UUID) async throws -> Data?
     let refresh: Date?
     var interrupted = false
+    var progress: () async -> Double? = { nil }
     var retry: () async -> Void = {}
     let preview: (UIImage) -> Void
     @Environment(\.scenePhase) private var scenePhase
@@ -1606,6 +1614,7 @@ private struct PhotoBubble: View {
     @State private var isVisible = true
     @State private var timedOut = false
     @State private var retryNonce = 0
+    @State private var transferProgress: Double?
 
     private var showsRetry: Bool { interrupted || timedOut }
 
@@ -1642,6 +1651,12 @@ private struct PhotoBubble: View {
             } else {
                 VStack(spacing: 10) {
                     Label(showsRetry ? "传输暂时中断" : "正在安全传输", systemImage: "photo.badge.arrow.down")
+                    if let transferProgress, transferProgress > 0 {
+                        ProgressView(value: transferProgress)
+                            .frame(width: 130)
+                        Text("\(Int(transferProgress * 100))%")
+                            .font(.caption2).monospacedDigit()
+                    }
                     if showsRetry {
                         Button("重试") {
                             timedOut = false
@@ -1665,6 +1680,7 @@ private struct PhotoBubble: View {
             for attempt in 0..<8 {
                 jpeg = try? await load(id)
                 image = jpeg.flatMap(UIImage.init(data:))
+                transferProgress = await progress()
                 if image != nil || attempt == 7 { break }
                 try? await Task.sleep(for: .seconds(2))
                 guard !Task.isCancelled, scenePhase == .active else { break }
