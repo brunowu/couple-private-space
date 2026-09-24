@@ -70,6 +70,7 @@ public struct SharedCycleProjection: Codable, Equatable, Sendable {
 public enum EventPayload: Codable, Equatable, Sendable {
     case message(text: String)
     case messageV2(MessageContent)
+    case chatReaction(ChatReactionContent)
     case media(MediaManifest)
     case profile(ProfileContent)
     case wishCreated(text: String)
@@ -83,6 +84,39 @@ public struct MessageContent: Codable, Equatable, Sendable {
     public let replyTo: UUID?
     public init(text: String, replyTo: UUID? = nil) {
         self.text = text; self.replyTo = replyTo
+    }
+}
+
+public enum ChatReaction: String, Codable, CaseIterable, Equatable, Sendable {
+    case heart, laugh, kiss, pleading, thumbsUp, hug
+    public var symbol: String {
+        switch self {
+        case .heart: "❤️"
+        case .laugh: "😂"
+        case .kiss: "😘"
+        case .pleading: "🥺"
+        case .thumbsUp: "👍"
+        case .hug: "🫂"
+        }
+    }
+}
+
+public struct ChatReactionContent: Codable, Equatable, Sendable {
+    public let targetID: UUID
+    /// Nil removes this author's existing reaction while preserving an ordering tombstone.
+    public let reaction: ChatReaction?
+    public init(targetID: UUID, reaction: ChatReaction?) {
+        self.targetID = targetID; self.reaction = reaction
+    }
+}
+
+public struct ChatReactionRecord: Codable, Equatable, Sendable {
+    public let targetID: UUID
+    public let author: UUID
+    public let reaction: ChatReaction?
+    public let version: Version
+    public init(targetID: UUID, author: UUID, reaction: ChatReaction?, version: Version) {
+        self.targetID = targetID; self.author = author; self.reaction = reaction; self.version = version
     }
 }
 
@@ -174,6 +208,7 @@ public struct DomainEvent: Codable, Equatable, Sendable {
         } else if case .journal(.sealCapsule(let capsule)) = payload, capsule.partnerSlotID != nil || capsule.companionOf != nil {
             self.schemaVersion = 3
         } else if case .messageV2 = payload { self.schemaVersion = 8
+        } else if case .chatReaction = payload { self.schemaVersion = 8
         } else if case .journal = payload { self.schemaVersion = 2 } else { self.schemaVersion = 1 }
     }
     public var version: Version { Version(clock: lamport, author: author, event: id) }
@@ -197,6 +232,8 @@ public struct DomainEvent: Codable, Equatable, Sendable {
             guard schemaVersion >= 8, content.replyTo != objectID,
                   !content.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   content.text.utf8.count <= 16_384 else { throw SpaceError.invalidInput }
+        case .chatReaction(let content):
+            guard schemaVersion >= 8, content.targetID == objectID else { throw SpaceError.invalidInput }
         case .wishStatus: break
         case .journal(let operation):
             guard schemaVersion >= 2 else { throw SpaceError.unsupportedVersion }
@@ -258,6 +295,8 @@ public struct SharedState: Codable, Equatable, Sendable {
     public var media: [UUID: MediaAsset] { mediaStorage ?? [:] }
     private var profileStorage: [UUID: SharedProfile]?
     public var profiles: [UUID: SharedProfile] { profileStorage ?? [:] }
+    private var chatReactionStorage: [UUID: [UUID: ChatReactionRecord]]?
+    public var chatReactions: [UUID: [UUID: ChatReactionRecord]] { chatReactionStorage ?? [:] }
     private struct StatusValue: Codable, Equatable { let status: WishStatus; let version: Version; var completedAt: Date? }
     public init() {}
     public mutating func apply(_ event: DomainEvent, cycleOwner: UUID?) throws {
@@ -287,6 +326,14 @@ public struct SharedState: Codable, Equatable, Sendable {
                                 replyTo: content.replyTo)
             if let old = messages[value.id], old != value { throw SpaceError.conflict }
             messages[value.id] = value
+        case .chatReaction(let content):
+            var all = chatReactions
+            var target = all[content.targetID] ?? [:]
+            if let old = target[event.author], old.version >= event.version { return }
+            target[event.author] = ChatReactionRecord(targetID: content.targetID, author: event.author,
+                                                       reaction: content.reaction, version: event.version)
+            all[content.targetID] = target
+            chatReactionStorage = all
         case .wishCreated(let text):
             if let old = wishes[event.objectID] {
                 guard old.creator == event.author, old.text == text else { throw SpaceError.conflict }

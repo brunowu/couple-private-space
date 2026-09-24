@@ -93,6 +93,25 @@ struct Clients {
     #expect(received.replyTo == original.objectID)
 }
 
+@Test func chatReactionsCanBeChangedAndRemovedWithoutCreatingMessages() async throws {
+    let c = try Clients(); defer { try? FileManager.default.removeItem(at: c.dir) }
+    let message = try await c.a.create(.message(text: "到家啦"))
+    try await c.a.sync(using: c.relay); try await c.b.sync(using: c.relay)
+    _ = try await c.a.create(.chatReaction(ChatReactionContent(targetID: message.objectID, reaction: .heart)),
+                             objectID: message.objectID)
+    _ = try await c.b.create(.chatReaction(ChatReactionContent(targetID: message.objectID, reaction: .hug)),
+                             objectID: message.objectID)
+    try await c.a.sync(using: c.relay); try await c.b.sync(using: c.relay)
+    try await c.a.sync(using: c.relay); try await c.b.sync(using: c.relay)
+    #expect(try await c.a.state().chatReactions[message.objectID]?[c.pairA.localID]?.reaction == .heart)
+    #expect(try await c.a.state().chatReactions[message.objectID]?[c.pairB.localID]?.reaction == .hug)
+    _ = try await c.a.create(.chatReaction(ChatReactionContent(targetID: message.objectID, reaction: nil)),
+                             objectID: message.objectID)
+    try await c.a.sync(using: c.relay); try await c.b.sync(using: c.relay)
+    #expect(try await c.b.state().chatReactions[message.objectID]?[c.pairA.localID]?.reaction == nil)
+    #expect(try await c.b.state().messages.count == 1)
+}
+
 @Test func changingReminderWindowKeepsIdentityAndNeverReplaysElapsedReminders() async throws {
     let c = try Clients(); defer { try? FileManager.default.removeItem(at: c.dir) }
     let now = Date()

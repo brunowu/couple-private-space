@@ -674,6 +674,45 @@ public struct ProductSpaceView: View {
         }
     }
 
+    private func setReaction(_ reaction: ChatReaction?, targetID: UUID) {
+        Task {
+            do { try await save(.chatReaction(ChatReactionContent(targetID: targetID, reaction: reaction)), targetID) }
+            catch { failure = "回应没有保存，请重试。" }
+        }
+    }
+
+    @ViewBuilder private func reactionMenu(targetID: UUID) -> some View {
+        Menu("回应", systemImage: "face.smiling") {
+            ForEach(ChatReaction.allCases, id: \.self) { reaction in
+                Button(reaction.symbol) { setReaction(reaction, targetID: targetID) }
+            }
+        }
+        if state.chatReactions[targetID]?[localID]?.reaction != nil {
+            Button("取消回应", systemImage: "xmark.circle") { setReaction(nil, targetID: targetID) }
+        }
+    }
+
+    @ViewBuilder private func reactionStrip(targetID: UUID) -> some View {
+        let values = (state.chatReactions[targetID] ?? [:]).values
+            .filter { $0.reaction != nil }
+            .sorted { $0.author.uuidString < $1.author.uuidString }
+        if !values.isEmpty {
+            HStack(spacing: 4) {
+                ForEach(values, id: \.author) { value in
+                    if let reaction = value.reaction {
+                        Text(reaction.symbol)
+                            .font(.caption)
+                            .padding(.horizontal, 7).padding(.vertical, 3)
+                            .background(value.author == localID ? SpaceStyle.accent.opacity(0.16) : SpaceStyle.softSurface,
+                                        in: Capsule())
+                            .overlay(Capsule().strokeBorder(SpaceStyle.border, lineWidth: 1))
+                            .accessibilityLabel("\(name(for: value.author))的回应：\(reaction.symbol)")
+                    }
+                }
+            }
+        }
+    }
+
     private func sendSelectedPhotos(_ selections: [PhotosPickerItem]) async {
         photoSending = true
         defer { photoSending = false; selectedChatPhotos = [] }
@@ -778,6 +817,9 @@ public struct ProductSpaceView: View {
                                     case .text(let message):
                                         if StickerReference.stickerID(from: message.text) != nil {
                                             messageBody(message)
+                                                .contextMenu {
+                                                    reactionMenu(targetID: message.id)
+                                                }
                                         } else {
                                             messageBody(message).padding(14)
                                                 .background(entry.author == localID ? SpaceStyle.accent.opacity(0.14) : card,
@@ -789,6 +831,7 @@ public struct ProductSpaceView: View {
                                                         UIPasteboard.general.string = message.text
                                                     }
                                                     Button("引用", systemImage: "quote.bubble") { quotedMessage = message; chatFocused = true }
+                                                    reactionMenu(targetID: message.id)
                                                     Button("加入共同回忆", systemImage: "bookmark") { remember(id: message.id, title: "收藏的对话", text: message.text, date: Date()) }
                                                 }
                                         }
@@ -801,11 +844,13 @@ public struct ProductSpaceView: View {
                                                                                     seedImage: $0)
                                                     })
                                             .contextMenu {
+                                                reactionMenu(targetID: asset.id)
                                                 Button("加入共同回忆", systemImage: "bookmark") {
                                                     rememberPhoto(asset.id)
                                                 }
                                             }
                                     }
+                                    reactionStrip(targetID: entry.id)
                                     if let createdAt = entryCreatedAt(entry) {
                                         Text(createdAt.formatted(date: .omitted, time: .shortened))
                                             .font(.caption2).foregroundStyle(.tertiary)
