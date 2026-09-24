@@ -432,9 +432,6 @@ public struct ProductSpaceView: View {
         .onChange(of: selectedChatPhotos) { _, photos in
             if !photos.isEmpty { Task { await sendSelectedPhotos(photos) } }
         }
-        .onChange(of: selectedChatVideo) { _, video in
-            if let video { Task { await sendSelectedVideo(video) } }
-        }
         .fileImporter(isPresented: $showingBackupImporter, allowedContentTypes: [.data]) { result in
             switch result {
             case .success(let url):
@@ -1007,9 +1004,6 @@ public struct ProductSpaceView: View {
                                  selectionBehavior: .ordered, matching: .images) {
                         Label("相册", systemImage: "photo.on.rectangle")
                     }.disabled(photoSending).accessibilityLabel("从相册选择").accessibilityIdentifier("chat-photo-picker")
-                    PhotosPicker(selection: $selectedChatVideo, matching: .videos) {
-                        Label("视频", systemImage: "video")
-                    }.disabled(photoSending).accessibilityLabel("从相册选择短视频")
                     Spacer(minLength: 0)
                 }
                 .font(.subheadline.weight(.medium))
@@ -1021,12 +1015,7 @@ public struct ProductSpaceView: View {
                         .padding(14).background(card, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                         .overlay(RoundedRectangle(cornerRadius: 24, style: .continuous).strokeBorder(SpaceStyle.border, lineWidth: 1))
                         .accessibilityIdentifier("message-draft")
-                    if draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Button { chatFocused = false; showingAudioRecorder = true } label: {
-                            Image(systemName: "mic.fill").font(.headline).foregroundStyle(.white)
-                                .frame(width: 46, height: 46).background(SpaceStyle.accent, in: Circle())
-                        }.disabled(sending).accessibilityLabel("录制语音")
-                    } else { Button {
+                    Button {
                     let raw = draft.trimmingCharacters(in: .whitespacesAndNewlines)
                     let payload: EventPayload = quotedMessage.map {
                         .messageV2(MessageContent(text: raw, replyTo: $0.id))
@@ -1038,9 +1027,8 @@ public struct ProductSpaceView: View {
                         sending = false
                     }
                     } label: { Image(systemName: "arrow.up").font(.headline).foregroundStyle(.white).frame(width: 46, height: 46).background(SpaceStyle.accent, in: Circle()) }
-                        .disabled(sending).accessibilityLabel("发送")
+                        .disabled(sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("发送")
                         .opacity(sending ? 0.45 : 1)
-                    }
                 }
             }.padding(16)
         }.background(paper)
@@ -1568,7 +1556,7 @@ private struct ContentComposer: View {
                 }
                 if case .memory = item { DatePicker("这一天", selection: $date, displayedComponents: .date) }
                 if case .memory(let record) = item {
-                    Section("照片或短视频（可选）") {
+                    Section("照片（可选）") {
                         if record?.value.mediaID != nil {
                             Label("已有附件，编辑会保留原附件", systemImage: "paperclip")
                                 .foregroundStyle(.secondary)
@@ -1580,9 +1568,6 @@ private struct ContentComposer: View {
                                     Label("从相册选择", systemImage: "photo.on.rectangle")
                                 }
                                 .buttonStyle(.bordered)
-                                PhotosPicker(selection: $selectedMemoryVideo, matching: .videos) {
-                                    Label("视频", systemImage: "video")
-                                }.buttonStyle(.bordered)
                             }
                             if let importedPhoto, let image = UIImage(data: importedPhoto.jpeg) {
                                 Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 180)
@@ -1730,16 +1715,10 @@ private struct VideoBubble: View {
                     .clipShape(RoundedRectangle(cornerRadius: 18))
             } else {
                 VStack(spacing: 10) {
-                    Label(showsRetry ? "视频传输暂时中断" : "正在安全传输视频", systemImage: "video")
+                    Label("视频传输已暂停", systemImage: "video")
                     if let transferProgress, transferProgress > 0 {
                         ProgressView(value: transferProgress).frame(width: 130)
                         Text("\(Int(transferProgress * 100))%").font(.caption2).monospacedDigit()
-                    }
-                    if showsRetry {
-                        Button("重试") {
-                            timedOut = false; retryNonce += 1
-                            Task { await retry() }
-                        }.buttonStyle(.bordered).controlSize(.small)
                     }
                 }
                 .font(.subheadline).foregroundStyle(.secondary)
@@ -1754,22 +1733,15 @@ private struct VideoBubble: View {
         .onChange(of: scenePhase) { _, phase in if phase != .active { player?.pause() } }
         .task(id: "\(scenePhase)-\(refresh?.timeIntervalSince1970 ?? 0)-\(retryNonce)") {
             guard scenePhase == .active else { return }
-            for attempt in 0..<12 {
-                if let data = try? await load(id) {
-                    do {
-                        let ext = kind == "video/mp4" ? "mp4" : "mov"
-                        let url = FileManager.default.temporaryDirectory.appendingPathComponent("couple-\(id.uuidString).\(ext)")
-                        try? FileManager.default.removeItem(at: url)
-                        try data.write(to: url, options: .atomic)
-                        try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
-                        temporaryURL = url; player = AVPlayer(url: url); timedOut = false
-                    } catch { timedOut = true }
-                    break
-                }
-                transferProgress = await progress()
-                if attempt == 11 { timedOut = true; break }
-                try? await Task.sleep(for: .seconds(2))
-                guard !Task.isCancelled, scenePhase == .active else { break }
+            if let data = try? await load(id) {
+                do {
+                    let ext = kind == "video/mp4" ? "mp4" : "mov"
+                    let url = FileManager.default.temporaryDirectory.appendingPathComponent("couple-\(id.uuidString).\(ext)")
+                    try? FileManager.default.removeItem(at: url)
+                    try data.write(to: url, options: .atomic)
+                    try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
+                    temporaryURL = url; player = AVPlayer(url: url); timedOut = false
+                } catch { timedOut = true }
             }
         }
         .onDisappear {

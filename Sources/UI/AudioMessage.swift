@@ -134,25 +134,16 @@ struct AudioBubble: View {
                     .frame(width: 34, height: 34).background(SpaceStyle.accent.opacity(0.16), in: Circle())
             }.disabled(player == nil)
             VStack(alignment: .leading, spacing: 5) {
-                Text(player.map { format($0.duration) } ?? (timedOut || interrupted ? "语音传输中断" : "正在安全传输语音"))
+                Text(player.map { format($0.duration) } ?? "语音传输已暂停")
                     .font(.subheadline)
                 if let transferProgress, player == nil { ProgressView(value: transferProgress).frame(width: 110) }
-            }
-            if player == nil && (timedOut || interrupted) {
-                Button("重试") { timedOut = false; retryNonce += 1; Task { await retry() } }
-                    .buttonStyle(.bordered).controlSize(.small)
             }
         }
         .padding(12).background(SpaceStyle.softSurface, in: RoundedRectangle(cornerRadius: 18))
         .task(id: "\(scenePhase)-\(refresh?.timeIntervalSince1970 ?? 0)-\(retryNonce)") {
             guard scenePhase == .active else { return }
-            for attempt in 0..<12 {
-                if let data = try? await load(id), let value = try? AVAudioPlayer(data: data) {
-                    player = value; timedOut = false; break
-                }
-                transferProgress = await progress()
-                if attempt == 11 { timedOut = true; break }
-                try? await Task.sleep(for: .seconds(2))
+            if let data = try? await load(id), let value = try? AVAudioPlayer(data: data) {
+                player = value; timedOut = false
             }
         }
         .task(id: isPlaying) {

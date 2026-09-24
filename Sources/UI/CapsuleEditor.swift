@@ -40,7 +40,7 @@ struct CapsuleEditor: View {
                 Section("想对未来说的话（可选）") {
                     TextEditor(text: field(\.text)).frame(minHeight: 180).accessibilityIdentifier("content-body")
                 }
-                Section("照片或短视频（可选）") {
+                Section("照片（可选）") {
                     HStack(spacing: 12) {
                         Button { showingCamera = true } label: { Label("拍照", systemImage: "camera") }
                             .buttonStyle(.bordered)
@@ -48,9 +48,6 @@ struct CapsuleEditor: View {
                             Label("照片", systemImage: "photo.on.rectangle")
                         }
                         .buttonStyle(.bordered)
-                        PhotosPicker(selection: $selectedVideo, matching: .videos) {
-                            Label("视频", systemImage: "video")
-                        }.buttonStyle(.bordered)
                     }
                     if let bytes = draft.photoJPEG, let image = UIImage(data: bytes) {
                         Image(uiImage: image).resizable().scaledToFit().frame(maxHeight: 180)
