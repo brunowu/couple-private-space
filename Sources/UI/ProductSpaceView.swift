@@ -1513,6 +1513,7 @@ private struct PhotoBubble: View {
     @State private var image: UIImage?
     @State private var jpeg: Data?
     @State private var saveStatus: String?
+    @State private var isVisible = true
 
     var body: some View {
         Group {
@@ -1521,7 +1522,7 @@ private struct PhotoBubble: View {
                     Group {
                         if kind == "image/gif", let jpeg {
                             AnimatedStickerImage(data: jpeg, cacheKey: id.uuidString,
-                                                 animate: scenePhase == .active && !reduceMotion)
+                                                 animate: isVisible && scenePhase == .active && !reduceMotion)
                                 .frame(width: 144, height: 144)
                         } else {
                             Image(uiImage: image).resizable().scaledToFit()
@@ -1552,6 +1553,7 @@ private struct PhotoBubble: View {
                     .accessibilityIdentifier("photo-awaiting-transfer")
             }
         }
+        .onScrollVisibilityChange(threshold: 0.05) { isVisible = $0 }
         .task(id: "\(scenePhase)-\(refresh?.timeIntervalSince1970 ?? 0)") {
             // Rotation and system overlays can briefly make the scene inactive. Keep the
             // decoded photo alive so an open full-screen viewer is not torn down.
@@ -1663,6 +1665,7 @@ struct AnimatedStickerImage: UIViewRepresentable {
 private struct LocalStickerBubble: View {
     let sticker: InstalledSticker
     @State private var data: Data?
+    @State private var isVisible = true
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -1671,7 +1674,7 @@ private struct LocalStickerBubble: View {
             if let data {
                 if sticker.record.mediaType == "image/gif" {
                     AnimatedStickerImage(data: data, cacheKey: sticker.id,
-                                         animate: scenePhase == .active && !reduceMotion)
+                                         animate: isVisible && scenePhase == .active && !reduceMotion)
                 } else if let image = UIImage(data: data) {
                     Image(uiImage: image).resizable().scaledToFit()
                 }
@@ -1680,6 +1683,7 @@ private struct LocalStickerBubble: View {
             }
         }
         .frame(width: 144, height: 144)
+        .onScrollVisibilityChange(threshold: 0.05) { isVisible = $0 }
         .task(id: sticker.id) {
             data = try? Data(contentsOf: sticker.mediaURL, options: .mappedIfSafe)
         }
