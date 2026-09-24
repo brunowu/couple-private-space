@@ -112,6 +112,47 @@ struct Clients {
     #expect(try await c.b.state().messages.count == 1)
 }
 
+@Test func chatRecallConvergesAndLocalDeleteStaysOnOneDevice() async throws {
+    let c = try Clients(); defer { try? FileManager.default.removeItem(at: c.dir) }
+    let message = try await c.a.create(.message(text: "说错了"))
+    try await c.a.sync(using: c.relay); try await c.b.sync(using: c.relay)
+
+    try await c.b.deleteChatItem(message.objectID, forEveryone: false)
+    #expect(try await c.b.hiddenChatIDs().contains(message.objectID))
+    #expect(try await c.a.hiddenChatIDs().isEmpty)
+    #expect(try await c.b.state().messages[message.objectID] != nil)
+
+    try await c.a.deleteChatItem(message.objectID, forEveryone: true)
+    try await c.a.sync(using: c.relay); try await c.b.sync(using: c.relay)
+    #expect(try await c.a.state().messages[message.objectID] == nil)
+    #expect(try await c.b.state().messages[message.objectID] == nil)
+}
+
+@Test func recallingPendingMessageRemovesItsQueueWork() async throws {
+    let c = try Clients(); defer { try? FileManager.default.removeItem(at: c.dir) }
+    let message = try await c.a.create(.message(text: "不要发送"))
+    #expect(try await c.a.unconfirmedEventCount() == 1)
+    try await c.a.deleteChatItem(message.objectID, forEveryone: true)
+    // Only the small recall event remains; the original is no longer queued.
+    #expect(try await c.a.unconfirmedEventCount() == 1)
+    try await c.a.sync(using: c.relay); try await c.b.sync(using: c.relay)
+    #expect(try await c.b.state().messages[message.objectID] == nil)
+}
+
+@Test func recalledMessageCannotReappearWhenEncryptedPacketsArriveOutOfOrder() async throws {
+    let c = try Clients(); defer { try? FileManager.default.removeItem(at: c.dir) }
+    let message = try await c.a.create(.message(text: "弱网下也不能复活"))
+    try await c.a.encryptPending()
+    let original = try #require(try await c.a.outgoing().first)
+    try await c.a.deleteChatItem(message.objectID, forEveryone: true)
+    try await c.a.encryptPending()
+    let recall = try #require(try await c.a.outgoing().first)
+
+    try await c.b.receive(recall)
+    try await c.b.receive(original)
+    #expect(try await c.b.state().messages[message.objectID] == nil)
+}
+
 @Test func changingReminderWindowKeepsIdentityAndNeverReplaysElapsedReminders() async throws {
     let c = try Clients(); defer { try? FileManager.default.removeItem(at: c.dir) }
     let now = Date()

@@ -71,12 +71,24 @@ public enum EventPayload: Codable, Equatable, Sendable {
     case message(text: String)
     case messageV2(MessageContent)
     case chatReaction(ChatReactionContent)
+    case chatDeletion(ChatDeletionContent)
     case media(MediaManifest)
     case profile(ProfileContent)
     case wishCreated(text: String)
     case wishStatus(WishStatus)
     case cycle(SharedCycleProjection)
     case journal(JournalOperation)
+}
+
+public struct ChatDeletionContent: Codable, Equatable, Sendable {
+    public let targetID: UUID
+    public init(targetID: UUID) { self.targetID = targetID }
+}
+
+public struct ChatDeletionRecord: Codable, Equatable, Sendable {
+    public let targetID: UUID
+    public let author: UUID
+    public let version: Version
 }
 
 public struct MessageContent: Codable, Equatable, Sendable {
@@ -209,11 +221,12 @@ public struct DomainEvent: Codable, Equatable, Sendable {
             self.schemaVersion = 3
         } else if case .messageV2 = payload { self.schemaVersion = 8
         } else if case .chatReaction = payload { self.schemaVersion = 8
+        } else if case .chatDeletion = payload { self.schemaVersion = 9
         } else if case .journal = payload { self.schemaVersion = 2 } else { self.schemaVersion = 1 }
     }
     public var version: Version { Version(clock: lamport, author: author, event: id) }
     public func validate(cycleOwner: UUID?) throws {
-        guard (1...8).contains(schemaVersion) else { throw SpaceError.unsupportedVersion }
+        guard (1...9).contains(schemaVersion) else { throw SpaceError.unsupportedVersion }
         guard sequence > 0, lamport > 0, lamport < UInt64.max, sequence < UInt64.max,
               createdAt.timeIntervalSince1970.isFinite else { throw SpaceError.invalidInput }
         switch payload {
@@ -234,6 +247,8 @@ public struct DomainEvent: Codable, Equatable, Sendable {
                   content.text.utf8.count <= 16_384 else { throw SpaceError.invalidInput }
         case .chatReaction(let content):
             guard schemaVersion >= 8, content.targetID == objectID else { throw SpaceError.invalidInput }
+        case .chatDeletion(let content):
+            guard schemaVersion >= 9, content.targetID == objectID else { throw SpaceError.invalidInput }
         case .wishStatus: break
         case .journal(let operation):
             guard schemaVersion >= 2 else { throw SpaceError.unsupportedVersion }
@@ -297,6 +312,8 @@ public struct SharedState: Codable, Equatable, Sendable {
     public var profiles: [UUID: SharedProfile] { profileStorage ?? [:] }
     private var chatReactionStorage: [UUID: [UUID: ChatReactionRecord]]?
     public var chatReactions: [UUID: [UUID: ChatReactionRecord]] { chatReactionStorage ?? [:] }
+    private var chatDeletionStorage: [UUID: ChatDeletionRecord]?
+    public var chatDeletions: [UUID: ChatDeletionRecord] { chatDeletionStorage ?? [:] }
     private struct StatusValue: Codable, Equatable { let status: WishStatus; let version: Version; var completedAt: Date? }
     public init() {}
     public mutating func apply(_ event: DomainEvent, cycleOwner: UUID?) throws {
@@ -308,6 +325,8 @@ public struct SharedState: Codable, Equatable, Sendable {
             values[event.author] = SharedProfile(author: event.author, value: profile, version: event.version)
             profileStorage = values
         case .media(let manifest):
+            if (manifest.destination == nil || manifest.destination == .chat),
+               chatDeletions[event.objectID]?.author == event.author { return }
             var assets = media
             let value = MediaAsset(id: event.objectID, author: event.author, manifest: manifest,
                                    version: event.version, createdAt: event.createdAt)
@@ -316,11 +335,13 @@ public struct SharedState: Codable, Equatable, Sendable {
         case .journal(let operation):
             var value = journal; try value.apply(operation, event: event); journalStorage = value
         case .message(let text):
+            if chatDeletions[event.objectID]?.author == event.author { return }
             let value = Message(id: event.objectID, author: event.author, text: text,
                                 version: event.version, createdAt: event.createdAt)
             if let old = messages[value.id], old != value { throw SpaceError.conflict }
             messages[value.id] = value
         case .messageV2(let content):
+            if chatDeletions[event.objectID]?.author == event.author { return }
             let value = Message(id: event.objectID, author: event.author, text: content.text,
                                 version: event.version, createdAt: event.createdAt,
                                 replyTo: content.replyTo)
@@ -334,6 +355,22 @@ public struct SharedState: Codable, Equatable, Sendable {
                                                        reaction: content.reaction, version: event.version)
             all[content.targetID] = target
             chatReactionStorage = all
+        case .chatDeletion(let content):
+            var deletions = chatDeletions
+            if let old = deletions[content.targetID], old.version >= event.version { return }
+            let chatAsset = media[content.targetID].flatMap {
+                ($0.destination == .chat) ? $0 : nil
+            }
+            let targetAuthor = messages[content.targetID]?.author ?? chatAsset?.author
+            if let targetAuthor, targetAuthor != event.author { throw SpaceError.unauthorized }
+            deletions[content.targetID] = ChatDeletionRecord(targetID: content.targetID,
+                                                              author: event.author,
+                                                              version: event.version)
+            chatDeletionStorage = deletions
+            if messages[content.targetID]?.author == event.author { messages.removeValue(forKey: content.targetID) }
+            if chatAsset?.author == event.author {
+                var assets = media; assets.removeValue(forKey: content.targetID); mediaStorage = assets
+            }
         case .wishCreated(let text):
             if let old = wishes[event.objectID] {
                 guard old.creator == event.author, old.text == text else { throw SpaceError.conflict }

@@ -399,6 +399,10 @@ public actor NetworkPair {
     public func openCapsule(_ id: UUID) async throws { try await client().openCapsule(id) }
     public func openWishReminder(_ id: UUID) async throws { try await client().openWishReminder(id) }
     public func createEvent(_ payload: EventPayload, objectID: UUID = UUID()) async throws { _ = try await client().create(payload, objectID: objectID) }
+    public func hiddenChatIDs() async throws -> Set<UUID> { try await client().hiddenChatIDs() }
+    public func deleteChatItem(_ id: UUID, forEveryone: Bool) async throws {
+        try await client().deleteChatItem(id, forEveryone: forEveryone)
+    }
     public func createPhoto(_ jpeg: Data, width: Int, height: Int) async throws {
         _ = try await client().createPhoto(jpeg, width: width, height: height)
     }

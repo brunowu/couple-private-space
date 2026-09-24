@@ -96,6 +96,8 @@ public struct ProductSpaceView: View {
     let showPairingFinal: (() -> Void)?
     let isCycleOwner: Bool
     let deliveries: [UUID: DeliveryState]
+    let hiddenChatIDs: Set<UUID>
+    let deleteChatItem: (UUID, Bool) async throws -> Void
     let save: (EventPayload, UUID) async throws -> Void
     let savePhoto: (Data, Int, Int) async throws -> Void
     let saveSticker: (Data, String, Int, Int) async throws -> Void
@@ -198,7 +200,9 @@ public struct ProductSpaceView: View {
 
     public init(state: SharedState, localID: UUID, peerDeviceID: UUID? = nil, pairingCode: String? = nil,
                 showPairingFinal: (() -> Void)? = nil, isCycleOwner: Bool,
-                deliveries: [UUID: DeliveryState], reminderStatus: String, syncStatus: String,
+                deliveries: [UUID: DeliveryState], hiddenChatIDs: Set<UUID> = [],
+                deleteChatItem: @escaping (UUID, Bool) async throws -> Void = { _, _ in },
+                reminderStatus: String, syncStatus: String,
                 photoRefresh: Date?,
                 save: @escaping (EventPayload, UUID) async throws -> Void,
                 privateCycle: CycleEntry?, cycle: @escaping (CycleEntry) async throws -> Void,
@@ -228,7 +232,8 @@ public struct ProductSpaceView: View {
                 verifyEncryptedBackup: @escaping (URL, String) async throws -> SpaceBackupPreview) {
         self.state = state; self.localID = localID; self.peerDeviceID = peerDeviceID
         self.pairingCode = pairingCode; self.showPairingFinal = showPairingFinal; self.isCycleOwner = isCycleOwner
-        self.deliveries = deliveries; self.save = save; self.cycle = cycle
+        self.deliveries = deliveries; self.hiddenChatIDs = hiddenChatIDs
+        self.deleteChatItem = deleteChatItem; self.save = save; self.cycle = cycle
         self.savePhoto = savePhoto; self.saveSticker = saveSticker
         self.saveMemoryWithPhoto = saveMemoryWithPhoto; self.loadPhoto = loadPhoto
         self.updateProfile = updateProfile
@@ -510,8 +515,9 @@ public struct ProductSpaceView: View {
     }
 
     private var chatEntries: [ChatEntry] {
-        let messages = state.messages.values.map { ChatEntry(id: $0.id, author: $0.author, version: $0.version, content: .text($0)) }
-        let photos = state.media.values.filter { $0.destination == .chat && $0.manifest.kind.hasPrefix("image/") }
+        let messages = state.messages.values.filter { !hiddenChatIDs.contains($0.id) }
+            .map { ChatEntry(id: $0.id, author: $0.author, version: $0.version, content: .text($0)) }
+        let photos = state.media.values.filter { $0.destination == .chat && $0.manifest.kind.hasPrefix("image/") && !hiddenChatIDs.contains($0.id) }
             .map { ChatEntry(id: $0.id, author: $0.author, version: $0.version, content: .photo($0)) }
         return (messages + photos).sorted { $0.version < $1.version }
     }
@@ -683,6 +689,29 @@ public struct ProductSpaceView: View {
         }
     }
 
+    private func removeChatItem(_ entry: ChatEntry, forEveryone: Bool) {
+        Task {
+            do {
+                try await deleteChatItem(entry.id, forEveryone)
+                selectedChatEntries.remove(entry.id)
+                if quotedMessage?.id == entry.id { quotedMessage = nil }
+            } catch {
+                failure = forEveryone ? "消息未能撤回，请重试。" : "消息未能删除，请重试。"
+            }
+        }
+    }
+
+    @ViewBuilder private func deletionMenu(for entry: ChatEntry) -> some View {
+        Button("从本机删除", systemImage: "trash", role: .destructive) {
+            removeChatItem(entry, forEveryone: false)
+        }
+        if entry.author == localID {
+            Button("为双方撤回", systemImage: "arrow.uturn.backward", role: .destructive) {
+                removeChatItem(entry, forEveryone: true)
+            }
+        }
+    }
+
     @ViewBuilder private func reactionMenu(targetID: UUID) -> some View {
         Menu("回应", systemImage: "face.smiling") {
             ForEach(ChatReaction.allCases, id: \.self) { reaction in
@@ -821,6 +850,7 @@ public struct ProductSpaceView: View {
                                             messageBody(message)
                                                 .contextMenu {
                                                     reactionMenu(targetID: message.id)
+                                                    deletionMenu(for: entry)
                                                 }
                                         } else {
                                             messageBody(message).padding(14)
@@ -835,6 +865,7 @@ public struct ProductSpaceView: View {
                                                     Button("引用", systemImage: "quote.bubble") { quotedMessage = message; chatFocused = true }
                                                     reactionMenu(targetID: message.id)
                                                     Button("加入共同回忆", systemImage: "bookmark") { remember(id: message.id, title: "收藏的对话", text: message.text, date: Date()) }
+                                                    deletionMenu(for: entry)
                                                 }
                                         }
                                     case .photo(let asset):
@@ -850,6 +881,7 @@ public struct ProductSpaceView: View {
                                                 Button("加入共同回忆", systemImage: "bookmark") {
                                                     rememberPhoto(asset.id)
                                                 }
+                                                deletionMenu(for: entry)
                                             }
                                     }
                                     reactionStrip(targetID: entry.id)

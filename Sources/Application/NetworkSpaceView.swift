@@ -27,6 +27,7 @@ import Vision
     @Published var inviteExpiry: Date?
     @Published var peerDeviceID: UUID?
     @Published var deliveries: [UUID: DeliveryState] = [:]
+    @Published var hiddenChatIDs: Set<UUID> = []
     @Published var reminderStatus = "愿望提醒尚未开启。"
     @Published var affection: Affection?
     @Published var capsuleDrafts: [CapsuleDraft] = []
@@ -115,6 +116,7 @@ import Vision
             do {
                 state = try await client.state(); pending = try await client.pendingCount()
                 deliveries = try await client.deliveries()
+                hiddenChatIDs = try await client.hiddenChatIDs()
                 capsuleDrafts = try await client.capsuleDrafts()
                 privateCycle = try await client.privateCycle()
                 openedCapsules = try await client.openedCapsules()
@@ -144,6 +146,12 @@ import Vision
         await refresh()
         await reconcileReminders()
         // Disk commit defines success. Network failure must not discard or duplicate a saved draft.
+        Task { await self.sync() }
+    }
+    func deleteChatItem(_ id: UUID, forEveryone: Bool) async throws {
+        guard let client else { throw SpaceError.notPaired }
+        try await client.deleteChatItem(id, forEveryone: forEveryone)
+        await refresh()
         Task { await self.sync() }
     }
     func savePhoto(_ jpeg: Data, width: Int, height: Int) async throws {
@@ -653,7 +661,8 @@ public struct NetworkSpaceView: View {
                 ProductSpaceView(state: model.state, localID: model.localID, peerDeviceID: model.peerDeviceID,
                     pairingCode: model.verificationCode, showPairingFinal: model.creator ? { showFinal = true } : nil,
                     isCycleOwner: model.owner,
-                    deliveries: model.deliveries, reminderStatus: model.reminderStatus,
+                    deliveries: model.deliveries, hiddenChatIDs: model.hiddenChatIDs,
+                    deleteChatItem: model.deleteChatItem, reminderStatus: model.reminderStatus,
                     syncStatus: !model.online ? "离线 · 内容保存在本机" : model.error != nil ? "暂未连接 · 等待重试" : model.lastSync == nil ? "等待同步" : "已连接 · 待回执 \(model.pending)",
                     photoRefresh: model.lastSync,
                     save: { try await model.save($0, objectID: $1) }, privateCycle: model.privateCycle, cycle: model.cycle,

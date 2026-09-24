@@ -67,6 +67,48 @@ public actor SyncCoordinator {
         // Local-first transaction is independent of encryption availability.
         return try db.transaction { try createInTransaction(payload, objectID: objectID, now: now) }
     }
+    public func hiddenChatIDs() throws -> Set<UUID> {
+        Set(try db.entries("hiddenChat").compactMap { UUID(uuidString: $0.0) })
+    }
+    public func deleteChatItem(_ targetID: UUID, forEveryone: Bool, now: Date = Date()) throws {
+        try db.transaction {
+            let current = try state()
+            let author = current.messages[targetID]?.author ?? current.media[targetID]?.author
+            guard let author else { throw SpaceError.missingRecord }
+            if forEveryone {
+                guard author == pair.localID else { throw SpaceError.unauthorized }
+                try cancelQueuedChatItem(targetID)
+                _ = try createInTransaction(.chatDeletion(ChatDeletionContent(targetID: targetID)),
+                                             objectID: targetID, now: now)
+            } else {
+                try db.write("hiddenChat", key: targetID.uuidString, value: Data([1]))
+            }
+        }
+    }
+    private func cancelQueuedChatItem(_ targetID: UUID) throws {
+        var eventIDs = Set<UUID>()
+        for (_, bytes) in try db.entries("events") {
+            guard let event = try? JSONDecoder().decode(DomainEvent.self, from: bytes),
+                  event.objectID == targetID else { continue }
+            switch event.payload {
+            case .message, .messageV2: eventIDs.insert(event.id)
+            case .media(let manifest) where manifest.destination == nil || manifest.destination == .chat:
+                eventIDs.insert(event.id)
+            default: break
+            }
+        }
+        for eventID in eventIDs {
+            try db.remove("pending", key: eventID.uuidString)
+            try db.remove("delivery", key: eventID.uuidString)
+        }
+        for (key, bytes) in try db.entries("outbox") {
+            guard let outgoing = try? JSONDecoder().decode(Outgoing.self, from: bytes),
+                  let eventID = outgoing.eventID, eventIDs.contains(eventID) else { continue }
+            try db.remove("outbox", key: key)
+        }
+        try db.remove("mediaBlobs", key: targetID.uuidString)
+        try db.remove("mediaRetry", key: targetID.uuidString)
+    }
     @discardableResult public func createPhoto(_ jpeg: Data, width: Int, height: Int,
                                                objectID: UUID = UUID(), now: Date = Date()) throws -> DomainEvent {
         let (manifest, sealed) = try preparePhoto(jpeg, width: width, height: height, destination: nil)
