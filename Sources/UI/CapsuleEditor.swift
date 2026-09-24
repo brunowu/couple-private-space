@@ -3,7 +3,6 @@ import SwiftUI
 import Domain
 import PhotosUI
 import UIKit
-import UniformTypeIdentifiers
 
 struct CapsuleEditor: View {
     @State var draft: CapsuleDraft
@@ -15,7 +14,6 @@ struct CapsuleEditor: View {
     @State private var failure: String?
     @State private var savedRevision: UInt64?
     @State private var selectedPhoto: PhotosPickerItem?
-    @State private var selectedVideo: PhotosPickerItem?
     @State private var photoLoading = false
     @State private var showingCamera = false
 
@@ -41,11 +39,11 @@ struct CapsuleEditor: View {
                     TextEditor(text: field(\.text)).frame(minHeight: 180).accessibilityIdentifier("content-body")
                 }
                 Section("照片（可选）") {
-                    HStack(spacing: 12) {
+                    HStack(spacing: 20) {
                         Button { showingCamera = true } label: { Label("拍照", systemImage: "camera") }
                             .buttonStyle(.bordered)
                         PhotosPicker(selection: $selectedPhoto, matching: .images) {
-                            Label("照片", systemImage: "photo.on.rectangle")
+                            Label("从相册选择", systemImage: "photo.on.rectangle")
                         }
                         .buttonStyle(.bordered)
                     }
@@ -54,14 +52,6 @@ struct CapsuleEditor: View {
                         Button("移除照片", role: .destructive) {
                             draft.photoJPEG = nil; draft.photoWidth = nil; draft.photoHeight = nil
                             selectedPhoto = nil; draft.revision += 1
-                        }
-                    }
-                    if draft.videoData != nil {
-                        Label("已选择短视频", systemImage: "video.fill")
-                        Button("移除视频", role: .destructive) {
-                            draft.videoData = nil; draft.videoKind = nil
-                            draft.videoWidth = nil; draft.videoHeight = nil
-                            selectedVideo = nil; draft.revision += 1
                         }
                     }
                 }
@@ -79,12 +69,12 @@ struct CapsuleEditor: View {
                             var final = draft
                             if final.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                                 final.title = final.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                                    ? "留给未来的一份记录" : "留给未来的话"
+                                    ? "留给未来的一张照片" : "留给未来的话"
                                 final.revision += 1
                             }
                             finish { try await seal(final) }
                         }
-                            .disabled(photoLoading || (draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.photoJPEG == nil && draft.videoData == nil) || draft.opensAt <= Date())
+                            .disabled(photoLoading || (draft.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && draft.photoJPEG == nil) || draft.opensAt <= Date())
                     }
                 }.disabled(saving || photoLoading)
         }.tint(SpaceStyle.accent).interactiveDismissDisabled()
@@ -93,13 +83,11 @@ struct CapsuleEditor: View {
                     do {
                         let photo = try PhotoImport.prepare(bytes)
                         draft.photoJPEG = photo.jpeg; draft.photoWidth = photo.width; draft.photoHeight = photo.height
-                        draft.videoData = nil; draft.videoKind = nil; draft.videoWidth = nil; draft.videoHeight = nil
-                        selectedVideo = nil
                         draft.revision += 1; failure = nil
                     } catch { failure = "无法使用这张照片，请重试。" }
                 }
             }
-            .task(id: draft.revision) {
+            .task(id: draft) {
                 let snapshot = draft
                 do {
                     try await Task.sleep(for: .milliseconds(250))
@@ -121,34 +109,12 @@ struct CapsuleEditor: View {
                         draft.photoJPEG = photo.jpeg
                         draft.photoWidth = photo.width
                         draft.photoHeight = photo.height
-                        draft.videoData = nil; draft.videoKind = nil; draft.videoWidth = nil; draft.videoHeight = nil
-                        selectedVideo = nil
                         draft.revision += 1
                         failure = nil
                     } catch {
                         failure = error as? SpaceError == .capacity
                             ? "照片处理后仍超过 2 MB，请选择另一张。"
                             : "无法读取这张照片，请重试。"
-                    }
-                }
-            }
-            .onChange(of: selectedVideo) { _, selection in
-                guard let selection else { return }
-                photoLoading = true
-                Task {
-                    defer { photoLoading = false }
-                    do {
-                        guard let picked = try await selection.loadTransferable(type: PickedVideo.self) else { throw SpaceError.invalidInput }
-                        defer { try? FileManager.default.removeItem(at: picked.url) }
-                        let video = try await VideoImport.prepare(picked.url)
-                        draft.videoData = video.data
-                        draft.videoKind = selection.supportedContentTypes.contains(where: { $0.conforms(to: .mpeg4Movie) })
-                            ? "video/mp4" : "video/quicktime"
-                        draft.videoWidth = video.width; draft.videoHeight = video.height
-                        draft.photoJPEG = nil; draft.photoWidth = nil; draft.photoHeight = nil
-                        selectedPhoto = nil; draft.revision += 1; failure = nil
-                    } catch {
-                        failure = error as? SpaceError == .capacity ? "视频需在 30 秒、25 MB 以内。" : "无法读取这个视频，请重试。"
                     }
                 }
             }

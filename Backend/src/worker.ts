@@ -222,16 +222,12 @@ export class PairObject extends DurableObject<Env> {
       socket.close(1008, 'pair inactive'); return;
     }
     if (typeof message === 'string') {
-      const match = /^need:([0-9a-f-]{36})(?::([0-9]{1,8}))?$/i.exec(message);
-      if (message.length > 128 || !match || !UUID.test(match[1]) || (match[2] !== undefined && Number(match[2]) > 25 * 1024 * 1024 + 64)) {
+      if (message.length > 128 || !/^need:[0-9a-f-]{36}$/i.test(message) || !UUID.test(message.slice(5))) {
         socket.close(1008, 'invalid request'); return;
       }
     } else {
-      const legacy = message.byteLength >= 44 && message.byteLength <= 2_001_000 &&
-        /^photo:[0-9a-f-]{36}:$/i.test(new TextDecoder().decode(message.slice(0, 43)));
-      const chunk = message.byteLength >= 66 && message.byteLength <= 256 * 1024 + 65 &&
-        /^chunk:[0-9a-f-]{36}:[0-9]{10}:[0-9]{10}:$/i.test(new TextDecoder().decode(message.slice(0, 65)));
-      if (!legacy && !chunk) {
+      if (message.byteLength > 2_001_000 || message.byteLength < 44 ||
+          !/^photo:[0-9a-f-]{36}:$/i.test(new TextDecoder().decode(message.slice(0, 43)))) {
         socket.close(1009, 'invalid photo'); return;
       }
     }

@@ -7,7 +7,6 @@ import QuickLook
 import UserNotifications
 import ImageIO
 import UniformTypeIdentifiers
-import AVKit
 
 enum SpaceStyle {
     static let accent = Color(uiColor: UIColor { traits in
@@ -100,10 +99,7 @@ public struct ProductSpaceView: View {
     let save: (EventPayload, UUID) async throws -> Void
     let savePhoto: (Data, Int, Int) async throws -> Void
     let saveSticker: (Data, String, Int, Int) async throws -> Void
-    let saveVideo: (Data, String, Int, Int) async throws -> Void
-    let saveAudio: (Data) async throws -> Void
     let saveMemoryWithPhoto: (MemoryContent, Data, Int, Int, UUID) async throws -> Void
-    let saveMemoryWithVideo: (MemoryContent, Data, String, Int, Int, UUID) async throws -> Void
     let loadPhoto: (UUID) async throws -> Data?
     let updateProfile: (String, (jpeg: Data, width: Int, height: Int)?, UUID?) async throws -> Void
     let privateCycle: CycleEntry?
@@ -112,9 +108,6 @@ public struct ProductSpaceView: View {
     let reminderStatus: String
     let syncStatus: String
     let photoRefresh: Date?
-    let interruptedMediaIDs: Set<UUID>
-    let mediaProgress: (UUID) async -> Double?
-    let retryMedia: (UUID) async -> Void
     let retry: () async -> Void
     let affection: Affection?
     let sendAffection: (AffectionKind) async throws -> Bool
@@ -163,9 +156,7 @@ public struct ProductSpaceView: View {
     @State private var tab = 0
     @State private var draft = ""
     @State private var selectedChatPhotos: [PhotosPickerItem] = []
-    @State private var selectedChatVideo: PhotosPickerItem?
     @State private var showingChatCamera = false
-    @State private var showingAudioRecorder = false
     @State private var showingStickerLibrary = false
     @StateObject private var stickerLibrary = StickerLibrary()
     @State private var stickerSmokeStarted = false
@@ -209,18 +200,12 @@ public struct ProductSpaceView: View {
                 showPairingFinal: (() -> Void)? = nil, isCycleOwner: Bool,
                 deliveries: [UUID: DeliveryState], reminderStatus: String, syncStatus: String,
                 photoRefresh: Date?,
-                interruptedMediaIDs: Set<UUID> = [],
-                mediaProgress: @escaping (UUID) async -> Double? = { _ in nil },
                 save: @escaping (EventPayload, UUID) async throws -> Void,
                 privateCycle: CycleEntry?, cycle: @escaping (CycleEntry) async throws -> Void,
                 savePhoto: @escaping (Data, Int, Int) async throws -> Void,
                 saveSticker: @escaping (Data, String, Int, Int) async throws -> Void,
-                saveVideo: @escaping (Data, String, Int, Int) async throws -> Void = { _, _, _, _ in },
-                saveAudio: @escaping (Data) async throws -> Void = { _ in },
                 saveMemoryWithPhoto: @escaping (MemoryContent, Data, Int, Int, UUID) async throws -> Void,
-                saveMemoryWithVideo: @escaping (MemoryContent, Data, String, Int, Int, UUID) async throws -> Void = { _, _, _, _, _, _ in },
                 loadPhoto: @escaping (UUID) async throws -> Data?,
-                retryMedia: @escaping (UUID) async -> Void = { _ in },
                 updateProfile: @escaping (String, (jpeg: Data, width: Int, height: Int)?, UUID?) async throws -> Void,
                 configureReminders: @escaping (Bool, Int, QuietHours) async throws -> Void,
                 retry: @escaping () async -> Void, affection: Affection?,
@@ -244,14 +229,12 @@ public struct ProductSpaceView: View {
         self.state = state; self.localID = localID; self.peerDeviceID = peerDeviceID
         self.pairingCode = pairingCode; self.showPairingFinal = showPairingFinal; self.isCycleOwner = isCycleOwner
         self.deliveries = deliveries; self.save = save; self.cycle = cycle
-        self.savePhoto = savePhoto; self.saveSticker = saveSticker; self.saveVideo = saveVideo; self.saveAudio = saveAudio
-        self.saveMemoryWithPhoto = saveMemoryWithPhoto; self.saveMemoryWithVideo = saveMemoryWithVideo; self.loadPhoto = loadPhoto
+        self.savePhoto = savePhoto; self.saveSticker = saveSticker
+        self.saveMemoryWithPhoto = saveMemoryWithPhoto; self.loadPhoto = loadPhoto
         self.updateProfile = updateProfile
         self.privateCycle = privateCycle
         self.configureReminders = configureReminders; self.reminderStatus = reminderStatus
         self.syncStatus = syncStatus; self.photoRefresh = photoRefresh; self.retry = retry
-        self.interruptedMediaIDs = interruptedMediaIDs; self.retryMedia = retryMedia
-        self.mediaProgress = mediaProgress
         self.affection = affection; self.sendAffection = sendAffection
         self.capsuleDrafts = capsuleDrafts; self.openedCapsules = openedCapsules
         self.saveCapsuleDraft = saveCapsuleDraft; self.sealCapsuleDraft = sealCapsuleDraft
@@ -348,8 +331,7 @@ public struct ProductSpaceView: View {
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: affection?.id)
         .sensoryFeedback(.impact(weight: .light), trigger: affection?.id) { _, next in affectionHaptics && next != nil }
         .sheet(item: $composing) { item in
-            ContentComposer(item: item, save: save, saveMemoryWithPhoto: saveMemoryWithPhoto,
-                            saveMemoryWithVideo: saveMemoryWithVideo)
+            ContentComposer(item: item, save: save, saveMemoryWithPhoto: saveMemoryWithPhoto)
         }
         .sheet(item: $editingCapsule) { value in
             CapsuleEditor(draft: value, saveDraft: saveCapsuleDraft, discard: discardCapsuleDraft,
@@ -384,9 +366,6 @@ public struct ProductSpaceView: View {
         }
         .sheet(isPresented: $showingChatCamera) {
             CameraPicker { data in Task { await sendCapturedPhoto(data) } }
-        }
-        .sheet(isPresented: $showingAudioRecorder) {
-            AudioRecorderSheet { data in try await saveAudio(data) }
         }
         .sheet(isPresented: $showingStickerLibrary) {
             StickerLibraryView(library: stickerLibrary) { sticker in
@@ -481,8 +460,10 @@ public struct ProductSpaceView: View {
                         Text(record.value.title).font(.largeTitle.bold())
                         Text(record.value.date, style: .date).foregroundStyle(.secondary)
                         if !record.value.text.isEmpty { Text(record.value.text).textSelection(.enabled) }
-                        if let mediaID = record.value.mediaID {
-                            attachmentView(mediaID)
+                        if let mediaID = record.value.mediaID,
+                           state.media[mediaID]?.manifest.kind.hasPrefix("image/") == true {
+                            PhotoBubble(id: mediaID, kind: "image/jpeg", load: loadPhoto, refresh: photoRefresh,
+                                        preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
                         }
                         if record.value.sourceID != nil { Label("留自两个人的日常", systemImage: "link").foregroundStyle(.secondary) }
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(24)
@@ -517,8 +498,10 @@ public struct ProductSpaceView: View {
         if state.journal.canOpen(part, now: now), openedCapsules.contains(part.id) {
             Text("\(name(for: part.author))写下的").font(.caption).foregroundStyle(.secondary)
             if !part.value.text.isEmpty { Text(part.value.text).textSelection(.enabled).accessibilityIdentifier("capsule-content") }
-            if let mediaID = part.value.mediaID {
-                attachmentView(mediaID)
+            if let mediaID = part.value.mediaID,
+               state.media[mediaID]?.manifest.kind.hasPrefix("image/") == true {
+                PhotoBubble(id: mediaID, kind: "image/jpeg", load: loadPhoto, refresh: photoRefresh,
+                            preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
             }
             Button("留作共同回忆") { rememberCapsule(part) }.buttonStyle(.bordered)
         } else {
@@ -526,25 +509,9 @@ public struct ProductSpaceView: View {
         }
     }
 
-    @ViewBuilder private func attachmentView(_ mediaID: UUID) -> some View {
-        let asset = state.media[mediaID]
-        if let manifest = asset?.manifest, manifest.kind.hasPrefix("video/") {
-            VideoBubble(id: mediaID, kind: manifest.kind, width: manifest.width, height: manifest.height,
-                        load: loadPhoto, refresh: photoRefresh,
-                        interrupted: interruptedMediaIDs.contains(mediaID),
-                        progress: { await mediaProgress(mediaID) }, retry: { await retryMedia(mediaID) })
-        } else {
-            PhotoBubble(id: mediaID, kind: manifestKind(asset), load: loadPhoto, refresh: photoRefresh,
-                        interrupted: interruptedMediaIDs.contains(mediaID),
-                        progress: { await mediaProgress(mediaID) }, retry: { await retryMedia(mediaID) },
-                        preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
-        }
-    }
-    private func manifestKind(_ asset: MediaAsset?) -> String { asset?.manifest.kind ?? "image/jpeg" }
-
     private var chatEntries: [ChatEntry] {
         let messages = state.messages.values.map { ChatEntry(id: $0.id, author: $0.author, version: $0.version, content: .text($0)) }
-        let photos = state.media.values.filter { $0.destination == .chat }
+        let photos = state.media.values.filter { $0.destination == .chat && $0.manifest.kind.hasPrefix("image/") }
             .map { ChatEntry(id: $0.id, author: $0.author, version: $0.version, content: .photo($0)) }
         return (messages + photos).sorted { $0.version < $1.version }
     }
@@ -553,7 +520,7 @@ public struct ProductSpaceView: View {
     }
     private var chatPhotoIDs: [UUID] {
         chatEntries.compactMap { entry in
-            if case .photo(let asset) = entry.content, asset.manifest.kind.hasPrefix("image/") { return asset.id }
+            if case .photo(let asset) = entry.content { return asset.id }
             return nil
         }
     }
@@ -598,9 +565,7 @@ public struct ProductSpaceView: View {
                 } else if value.replyTo != nil {
                     content = "↩︎ 回复一条暂不可用的消息\n\(body)"
                 } else { content = body }
-            case .photo(let asset):
-                content = asset.manifest.kind.hasPrefix("video/") ? "[视频]"
-                    : asset.manifest.kind.hasPrefix("audio/") ? "[语音]" : "[照片]"
+            case .photo: content = "[照片]"
             }
             return "[\(time)] \(name(for: entry.author))：\(content)"
         }.joined(separator: "\n\n")
@@ -775,22 +740,6 @@ public struct ProductSpaceView: View {
             failure = error as? SpaceError == .capacity ? "照片处理后仍超过 2 MB，请重试。" : "无法使用这张照片，请重试。"
         }
     }
-    private func sendSelectedVideo(_ selection: PhotosPickerItem) async {
-        photoSending = true
-        defer { photoSending = false; selectedChatVideo = nil }
-        do {
-            guard let picked = try await selection.loadTransferable(type: PickedVideo.self) else { throw SpaceError.invalidInput }
-            defer { try? FileManager.default.removeItem(at: picked.url) }
-            let video = try await VideoImport.prepare(picked.url)
-            let kind = selection.supportedContentTypes.contains(where: { $0.conforms(to: .mpeg4Movie) })
-                ? "video/mp4" : "video/quicktime"
-            try await saveVideo(video.data, kind, video.width, video.height)
-        } catch {
-            failure = error as? SpaceError == .capacity
-                ? "视频需在 30 秒、25 MB 以内。"
-                : "无法读取或发送这个视频，请换一个再试。"
-        }
-    }
     private func sendSticker(_ sticker: InstalledSticker) async {
         photoSending = true
         defer { photoSending = false }
@@ -889,26 +838,8 @@ public struct ProductSpaceView: View {
                                                 }
                                         }
                                     case .photo(let asset):
-                                        if asset.manifest.kind.hasPrefix("audio/") {
-                                            AudioBubble(id: asset.id, load: loadPhoto, refresh: photoRefresh,
-                                                        interrupted: interruptedMediaIDs.contains(asset.id),
-                                                        progress: { await mediaProgress(asset.id) },
-                                                        retry: { await retryMedia(asset.id) })
-                                                .contextMenu { reactionMenu(targetID: asset.id) }
-                                        } else if asset.manifest.kind.hasPrefix("video/") {
-                                            VideoBubble(id: asset.id, kind: asset.manifest.kind,
-                                                        width: asset.manifest.width, height: asset.manifest.height,
-                                                        load: loadPhoto, refresh: photoRefresh,
-                                                        interrupted: interruptedMediaIDs.contains(asset.id),
-                                                        progress: { await mediaProgress(asset.id) },
-                                                        retry: { await retryMedia(asset.id) })
-                                                .contextMenu { reactionMenu(targetID: asset.id) }
-                                        } else {
                                         PhotoBubble(id: asset.id, kind: asset.manifest.kind,
                                                     load: loadPhoto, refresh: photoRefresh,
-                                                    interrupted: interruptedMediaIDs.contains(asset.id),
-                                                    progress: { await mediaProgress(asset.id) },
-                                                    retry: { await retryMedia(asset.id) },
                                                     preview: {
                                                         photoPreview = PhotoPreview(photoIDs: chatPhotoIDs,
                                                                                     selectedID: asset.id,
@@ -920,7 +851,6 @@ public struct ProductSpaceView: View {
                                                     rememberPhoto(asset.id)
                                                 }
                                             }
-                                        }
                                     }
                                     reactionStrip(targetID: entry.id)
                                     if let createdAt = entryCreatedAt(entry) {
@@ -1028,7 +958,7 @@ public struct ProductSpaceView: View {
                     }
                     } label: { Image(systemName: "arrow.up").font(.headline).foregroundStyle(.white).frame(width: 46, height: 46).background(SpaceStyle.accent, in: Circle()) }
                         .disabled(sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty).accessibilityLabel("发送")
-                        .opacity(sending ? 0.45 : 1)
+                        .opacity(sending || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.45 : 1)
                 }
             }.padding(16)
         }.background(paper)
@@ -1126,11 +1056,9 @@ public struct ProductSpaceView: View {
                                     }
                                 }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                             }.buttonStyle(.plain)
-                            if let mediaID = record.value.mediaID {
+                            if let mediaID = record.value.mediaID,
+                               state.media[mediaID]?.manifest.kind.hasPrefix("image/") == true {
                                 PhotoBubble(id: mediaID, kind: "image/jpeg", load: loadPhoto, refresh: photoRefresh,
-                                            interrupted: interruptedMediaIDs.contains(mediaID),
-                                            progress: { await mediaProgress(mediaID) },
-                                            retry: { await retryMedia(mediaID) },
                                             preview: { photoPreview = PhotoPreview(photoIDs: [mediaID], selectedID: mediaID, seedImage: $0) })
                             }
                             Menu("整理回忆") {
@@ -1520,7 +1448,6 @@ private struct ContentComposer: View {
     let item: Composer
     let save: (EventPayload, UUID) async throws -> Void
     let saveMemoryWithPhoto: (MemoryContent, Data, Int, Int, UUID) async throws -> Void
-    let saveMemoryWithVideo: (MemoryContent, Data, String, Int, Int, UUID) async throws -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var text = ""
@@ -1533,13 +1460,11 @@ private struct ContentComposer: View {
     @State private var objectID = UUID()
     @State private var selectedMemoryPhoto: PhotosPickerItem?
     @State private var importedPhoto: (jpeg: Data, width: Int, height: Int)?
-    @State private var selectedMemoryVideo: PhotosPickerItem?
-    @State private var importedVideo: (data: Data, kind: String, width: Int, height: Int)?
     @State private var photoLoading = false
     @State private var showingCamera = false
     private var needsTitle: Bool { switch item { case .memory: true; default: false } }
     private var allowsEmptyText: Bool {
-        if case .memory(let record) = item { return importedPhoto != nil || importedVideo != nil || record?.value.mediaID != nil }
+        if case .memory(let record) = item { return importedPhoto != nil || record?.value.mediaID != nil }
         return false
     }
     var body: some View {
@@ -1558,7 +1483,7 @@ private struct ContentComposer: View {
                 if case .memory(let record) = item {
                     Section("照片（可选）") {
                         if record?.value.mediaID != nil {
-                            Label("已有附件，编辑会保留原附件", systemImage: "paperclip")
+                            Label("已附有照片，编辑会保留原照片", systemImage: "photo")
                                 .foregroundStyle(.secondary)
                         } else {
                             HStack(spacing: 20) {
@@ -1575,12 +1500,6 @@ private struct ContentComposer: View {
                                     self.importedPhoto = nil; selectedMemoryPhoto = nil
                                 }
                             }
-                            if importedVideo != nil {
-                                Label("已选择短视频", systemImage: "video.fill")
-                                Button("移除所选视频", role: .destructive) {
-                                    importedVideo = nil; selectedMemoryVideo = nil
-                                }
-                            }
                         }
                     }
                 }
@@ -1594,10 +1513,7 @@ private struct ContentComposer: View {
         }.tint(SpaceStyle.accent).interactiveDismissDisabled(saving)
             .sheet(isPresented: $showingCamera) {
                 CameraPicker { bytes in
-                    do {
-                        importedPhoto = try PhotoImport.prepare(bytes)
-                        importedVideo = nil; selectedMemoryVideo = nil; error = nil
-                    }
+                    do { importedPhoto = try PhotoImport.prepare(bytes); error = nil }
                     catch { self.error = "无法使用这张照片，请重试。" }
                 }
             }
@@ -1621,7 +1537,6 @@ private struct ContentComposer: View {
                             throw SpaceError.invalidInput
                         }
                         importedPhoto = try PhotoImport.prepare(bytes)
-                        importedVideo = nil; selectedMemoryVideo = nil
                         error = nil
                     } catch {
                         self.error = error as? SpaceError == .capacity
@@ -1630,29 +1545,10 @@ private struct ContentComposer: View {
                     }
                 }
             }
-            .onChange(of: selectedMemoryVideo) { _, selection in
-                guard let selection else { return }
-                photoLoading = true
-                Task {
-                    defer { photoLoading = false }
-                    do {
-                        guard let picked = try await selection.loadTransferable(type: PickedVideo.self) else { throw SpaceError.invalidInput }
-                        defer { try? FileManager.default.removeItem(at: picked.url) }
-                        let video = try await VideoImport.prepare(picked.url)
-                        let kind = selection.supportedContentTypes.contains(where: { $0.conforms(to: .mpeg4Movie) })
-                            ? "video/mp4" : "video/quicktime"
-                        importedVideo = (video.data, kind, video.width, video.height)
-                        importedPhoto = nil; selectedMemoryPhoto = nil; error = nil
-                    } catch {
-                        self.error = error as? SpaceError == .capacity ? "视频需在 30 秒、25 MB 以内。" : "无法读取这个视频，请重试。"
-                    }
-                }
-            }
     }
     private func persist() {
         let payload: EventPayload
         let photo = importedPhoto
-        let video = importedVideo
         var photoMemory: MemoryContent?
         switch item {
         case .wish: payload = .wishCreated(text: text)
@@ -1664,8 +1560,8 @@ private struct ContentComposer: View {
             let name = title.trimmingCharacters(in: .whitespacesAndNewlines)
             let memory = MemoryContent(title: name.isEmpty ? (text.isEmpty ? "一起留下的照片" : "一起留下的一段话") : name,
                                        text: text, date: date,
-                                       sourceID: photo == nil && video == nil ? record?.value.sourceID : objectID,
-                                       mediaID: photo == nil && video == nil ? record?.value.mediaID : objectID)
+                                       sourceID: photo == nil ? record?.value.sourceID : objectID,
+                                       mediaID: photo == nil ? record?.value.mediaID : objectID)
             photoMemory = memory
             payload = .journal(.memory(memory))
         }
@@ -1674,8 +1570,6 @@ private struct ContentComposer: View {
             do {
                 if let photo, let photoMemory {
                     try await saveMemoryWithPhoto(photoMemory, photo.jpeg, photo.width, photo.height, objectID)
-                } else if let video, let photoMemory {
-                    try await saveMemoryWithVideo(photoMemory, video.data, video.kind, video.width, video.height, objectID)
                 } else {
                     try await save(payload, objectID)
                 }
@@ -1686,81 +1580,11 @@ private struct ContentComposer: View {
         }
     }
 }
-private struct VideoBubble: View {
-    let id: UUID
-    let kind: String
-    let width: Int
-    let height: Int
-    let load: (UUID) async throws -> Data?
-    let refresh: Date?
-    var interrupted = false
-    var progress: () async -> Double? = { nil }
-    var retry: () async -> Void = {}
-    @Environment(\.scenePhase) private var scenePhase
-    @State private var player: AVPlayer?
-    @State private var temporaryURL: URL?
-    @State private var transferProgress: Double?
-    @State private var timedOut = false
-    @State private var retryNonce = 0
-    @State private var isVisible = true
-
-    private var showsRetry: Bool { interrupted || timedOut }
-
-    var body: some View {
-        Group {
-            if let player {
-                VideoPlayer(player: player)
-                    .aspectRatio(CGFloat(width) / CGFloat(height), contentMode: .fit)
-                    .frame(maxWidth: 240, maxHeight: 280)
-                    .clipShape(RoundedRectangle(cornerRadius: 18))
-            } else {
-                VStack(spacing: 10) {
-                    Label("视频传输已暂停", systemImage: "video")
-                    if let transferProgress, transferProgress > 0 {
-                        ProgressView(value: transferProgress).frame(width: 130)
-                        Text("\(Int(transferProgress * 100))%").font(.caption2).monospacedDigit()
-                    }
-                }
-                .font(.subheadline).foregroundStyle(.secondary)
-                .frame(width: 220, height: 150)
-                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
-            }
-        }
-        .onScrollVisibilityChange(threshold: 0.05) {
-            isVisible = $0
-            if !$0 { player?.pause() }
-        }
-        .onChange(of: scenePhase) { _, phase in if phase != .active { player?.pause() } }
-        .task(id: "\(scenePhase)-\(refresh?.timeIntervalSince1970 ?? 0)-\(retryNonce)") {
-            guard scenePhase == .active else { return }
-            if let data = try? await load(id) {
-                do {
-                    let ext = kind == "video/mp4" ? "mp4" : "mov"
-                    let url = FileManager.default.temporaryDirectory.appendingPathComponent("couple-\(id.uuidString).\(ext)")
-                    try? FileManager.default.removeItem(at: url)
-                    try data.write(to: url, options: .atomic)
-                    try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
-                    temporaryURL = url; player = AVPlayer(url: url); timedOut = false
-                } catch { timedOut = true }
-            }
-        }
-        .onDisappear {
-            player?.pause(); player = nil
-            if let temporaryURL { try? FileManager.default.removeItem(at: temporaryURL) }
-            temporaryURL = nil
-        }
-        .accessibilityIdentifier("chat-video")
-    }
-}
-
 private struct PhotoBubble: View {
     let id: UUID
     let kind: String
     let load: (UUID) async throws -> Data?
     let refresh: Date?
-    var interrupted = false
-    var progress: () async -> Double? = { nil }
-    var retry: () async -> Void = {}
     let preview: (UIImage) -> Void
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -1768,11 +1592,6 @@ private struct PhotoBubble: View {
     @State private var jpeg: Data?
     @State private var saveStatus: String?
     @State private var isVisible = true
-    @State private var timedOut = false
-    @State private var retryNonce = 0
-    @State private var transferProgress: Double?
-
-    private var showsRetry: Bool { interrupted || timedOut }
 
     var body: some View {
         Group {
@@ -1805,43 +1624,20 @@ private struct PhotoBubble: View {
                     }.accessibilityLabel("保存到相册").padding(8)
                 }
             } else {
-                VStack(spacing: 10) {
-                    Label(showsRetry ? "传输暂时中断" : "正在安全传输", systemImage: "photo.badge.arrow.down")
-                    if let transferProgress, transferProgress > 0 {
-                        ProgressView(value: transferProgress)
-                            .frame(width: 130)
-                        Text("\(Int(transferProgress * 100))%")
-                            .font(.caption2).monospacedDigit()
-                    }
-                    if showsRetry {
-                        Button("重试") {
-                            timedOut = false
-                            retryNonce += 1
-                            Task { await retry() }
-                        }
-                            .buttonStyle(.bordered).controlSize(.small)
-                    }
-                }
-                .font(.subheadline).foregroundStyle(.secondary)
-                .frame(width: 210, height: 140)
-                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
-                .accessibilityIdentifier("photo-awaiting-transfer")
+                Label("等待安全传输", systemImage: "photo.badge.arrow.down")
+                    .font(.subheadline).foregroundStyle(.secondary)
+                    .frame(width: 210, height: 140)
+                    .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
+                    .accessibilityIdentifier("photo-awaiting-transfer")
             }
         }
         .onScrollVisibilityChange(threshold: 0.05) { isVisible = $0 }
-        .task(id: "\(scenePhase)-\(refresh?.timeIntervalSince1970 ?? 0)-\(retryNonce)") {
+        .task(id: "\(scenePhase)-\(refresh?.timeIntervalSince1970 ?? 0)") {
             // Rotation and system overlays can briefly make the scene inactive. Keep the
             // decoded photo alive so an open full-screen viewer is not torn down.
             guard scenePhase == .active else { return }
-            for attempt in 0..<8 {
-                jpeg = try? await load(id)
-                image = jpeg.flatMap(UIImage.init(data:))
-                transferProgress = await progress()
-                if image != nil || attempt == 7 { break }
-                try? await Task.sleep(for: .seconds(2))
-                guard !Task.isCancelled, scenePhase == .active else { break }
-            }
-            if image == nil, scenePhase == .active { timedOut = true }
+            jpeg = try? await load(id)
+            image = jpeg.flatMap(UIImage.init(data:))
         }
         .alert("照片", isPresented: Binding(get: { saveStatus != nil }, set: { if !$0 { saveStatus = nil } })) {
             Button("好") { saveStatus = nil }

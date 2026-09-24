@@ -55,11 +55,6 @@ private struct PairSetup: Codable {
     var response: String?
     var final: String?
 }
-private struct MediaRetryRecord: Codable {
-    var attempts: Int
-    var nextAttempt: Date
-}
-private struct MediaPartialMetadata: Codable { let total: Int }
 
 public enum PairingVerification {
     /// Both phones derive the same 64-bit display code from their Signal identities and this space.
@@ -79,20 +74,14 @@ public enum PairingVerification {
 public actor NetworkPair {
     private let db: EncryptedDatabase
     private let vault: any KeyVault
-    private let mediaPartialDirectory: URL
     private var setup: PairSetup?
     private var cipher: SignalSession?
     private var relay: HTTPRelay?
     private var coordinator: SyncCoordinator?
     private var mediaSocket: URLSessionWebSocketTask?
-    private var mediaRetryTask: Task<Void, Never>?
     private var busy = false
     public init(directory: URL, vault: any KeyVault) throws {
         self.vault = vault
-        mediaPartialDirectory = directory.appendingPathComponent("MediaPartials", isDirectory: true)
-        try FileManager.default.createDirectory(at: mediaPartialDirectory, withIntermediateDirectories: true)
-        var values = URLResourceValues(); values.isExcludedFromBackup = true
-        var partialDirectory = mediaPartialDirectory; try partialDirectory.setResourceValues(values)
         let key: Data
         if let saved = try vault.load("network.database") { key = saved }
         else { key = try secureRandomKey(); try vault.save(key, name: "network.database") }
@@ -346,82 +335,17 @@ public actor NetworkPair {
         try await checkPairStatus()
         let client = try client()
         try await client.sync(using: relay!)
-        // Large audio/video transfers need a durable transport before they can be
-        // reliable in the background. Keep the live channel photo-only so failed
-        // media cannot starve ordinary messages or start an endless retry loop.
+        // The mailbox carries only the signed manifest. The photo bytes pass through
+        // a live socket and are never added to the server's durable storage.
         do {
-            let now = Date()
-            let state = try await client.state()
-            let allMissing = Set(try await client.missingPeerPhotoIDs())
-            let missing = Set(allMissing.filter {
-                state.media[$0]?.manifest.kind.hasPrefix("image/") == true
-            })
-            let stale = try db.entries("mediaRetry").compactMap { key, _ -> String? in
-                UUID(uuidString: key).map { missing.contains($0) } == true ? nil : key
-            }
-            if !stale.isEmpty { try db.transaction { for key in stale { try db.remove("mediaRetry", key: key) } } }
-            cleanupPartialMedia(keeping: missing)
-            guard !missing.isEmpty else {
-                scheduleMediaRetry(at: nil)
-                mediaSocket?.cancel(with: .goingAway, reason: nil)
-                mediaSocket = nil
-                return
-            }
             try await ensureMediaSocket()
-            var nextRetry: Date?
-            let ordered = missing.sorted {
-                (state.media[$0]?.manifest.byteCount ?? .max) < (state.media[$1]?.manifest.byteCount ?? .max)
+            for id in try await client.missingPeerPhotoIDs() {
+                try await mediaSocket?.send(.string("need:\(id.uuidString)"))
             }
-            // Pull one image per pass. Completion schedules the next ordinary sync.
-            for id in ordered.prefix(1) {
-                if await finalizePartialMediaIfComplete(id) { continue }
-                let record = try db.decode(MediaRetryRecord.self, table: "mediaRetry", key: id.uuidString)
-                if (record?.attempts ?? 0) >= 3 { continue }
-                if let record, record.nextAttempt > now {
-                    nextRetry = min(nextRetry ?? record.nextAttempt, record.nextAttempt)
-                    continue
-                }
-                let offset = partialOffset(for: id)
-                try await mediaSocket?.send(.string("need:\(id.uuidString):\(offset)"))
-                let attempts = min((record?.attempts ?? 0) + 1, 3)
-                let delays: [TimeInterval] = [3, 10, 30]
-                let due = now.addingTimeInterval(delays[min(attempts - 1, delays.count - 1)])
-                try db.transaction {
-                    try db.encode(MediaRetryRecord(attempts: attempts, nextAttempt: due),
-                                  table: "mediaRetry", key: id.uuidString)
-                }
-                nextRetry = min(nextRetry ?? due, due)
-            }
-            scheduleMediaRetry(at: nextRetry)
         } catch {
-            let due = Date().addingTimeInterval(5)
-            if let state = try? await client.state(), let allMissing = try? await client.missingPeerPhotoIDs() {
-                for id in allMissing where state.media[id]?.manifest.kind.hasPrefix("image/") == true {
-                    let old = try? db.decode(MediaRetryRecord.self, table: "mediaRetry", key: id.uuidString)
-                    let attempts = min((old?.attempts ?? 0) + 1, 3)
-                    try? db.transaction {
-                        try db.encode(MediaRetryRecord(attempts: attempts, nextAttempt: due),
-                                      table: "mediaRetry", key: id.uuidString)
-                    }
-                }
-            }
             mediaSocket?.cancel(with: .goingAway, reason: nil)
             mediaSocket = nil
-            let retryable = (try? db.entries("mediaRetry").contains {
-                (try? JSONDecoder().decode(MediaRetryRecord.self, from: $0.1).attempts) ?? 3 < 3
-            }) ?? false
-            scheduleMediaRetry(at: retryable ? due : nil)
             // Text synchronization remains available when the live media channel is offline.
-        }
-    }
-    private func scheduleMediaRetry(at date: Date?) {
-        mediaRetryTask?.cancel()
-        guard let date else { mediaRetryTask = nil; return }
-        let delay = max(0.5, date.timeIntervalSinceNow)
-        mediaRetryTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(delay))
-            guard !Task.isCancelled else { return }
-            try? await self?.synchronize()
         }
     }
     private func ensureMediaSocket() async throws {
@@ -436,39 +360,19 @@ public actor NetworkPair {
                 let message = try await socket.receive()
                 switch message {
                 case .string(let request):
-                    let fields = request.split(separator: ":", omittingEmptySubsequences: false)
-                    guard fields.count == 2 || fields.count == 3, fields[0] == "need",
-                          let id = UUID(uuidString: String(fields[1])),
+                    guard request.hasPrefix("need:"),
+                          let id = UUID(uuidString: String(request.dropFirst(5))),
                           let sealed = try await client().photoCiphertext(id) else { continue }
-                    if fields.count == 2 {
-                        var frame = Data("photo:\(id.uuidString):".utf8)
-                        frame.append(sealed)
-                        try await socket.send(.data(frame))
-                    } else {
-                        guard let offset = Int(fields[2]), offset >= 0, offset < sealed.count else { continue }
-                        let end = min(sealed.count, offset + 256 * 1024)
-                        let header = String(format: "chunk:%@:%010d:%010d:", id.uuidString, offset, sealed.count)
-                        var frame = Data(header.utf8); frame.append(sealed[offset..<end])
-                        try await socket.send(.data(frame))
-                    }
+                    var frame = Data("photo:\(id.uuidString):".utf8)
+                    frame.append(sealed)
+                    try await socket.send(.data(frame))
                 case .data(let frame):
-                    if frame.count >= 66,
-                       let header = String(data: frame.prefix(65), encoding: .utf8), header.hasPrefix("chunk:") {
-                        let fields = header.split(separator: ":", omittingEmptySubsequences: false)
-                        guard fields.count == 5, let id = UUID(uuidString: String(fields[1])),
-                              let offset = Int(fields[2]), let total = Int(fields[3]) else { continue }
-                        try await receiveMediaChunk(Data(frame.dropFirst(65)), id: id, offset: offset,
-                                                    total: total, socket: socket)
-                    } else {
-                        guard frame.count >= 44,
-                              let header = String(data: frame.prefix(43), encoding: .utf8),
-                              header.hasPrefix("photo:"), header.hasSuffix(":"),
-                              let id = UUID(uuidString: String(header.dropFirst(6).dropLast())) else { continue }
-                        try await client().receivePhotoCiphertext(Data(frame.dropFirst(43)), id: id)
-                        clearPartialMedia(id)
-                        try db.transaction { try db.remove("mediaRetry", key: id.uuidString) }
-                        try await client().sync(using: relay!)
-                    }
+                    guard frame.count >= 44,
+                          let header = String(data: frame.prefix(43), encoding: .utf8),
+                          header.hasPrefix("photo:"), header.hasSuffix(":"),
+                          let id = UUID(uuidString: String(header.dropFirst(6).dropLast())) else { continue }
+                    try await client().receivePhotoCiphertext(Data(frame.dropFirst(43)), id: id)
+                    try await client().sync(using: relay!)
                 @unknown default: break
                 }
             } catch {
@@ -476,70 +380,6 @@ public actor NetworkPair {
             }
         }
         if mediaSocket === socket { mediaSocket = nil }
-    }
-    private func partialDataURL(_ id: UUID) -> URL { mediaPartialDirectory.appendingPathComponent(id.uuidString + ".part") }
-    private func partialMetadataURL(_ id: UUID) -> URL { mediaPartialDirectory.appendingPathComponent(id.uuidString + ".json") }
-    private func partialOffset(for id: UUID) -> Int {
-        guard let metadata = try? Data(contentsOf: partialMetadataURL(id)),
-              (try? JSONDecoder().decode(MediaPartialMetadata.self, from: metadata)) != nil else {
-            clearPartialMedia(id); return 0
-        }
-        return (try? partialDataURL(id).resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-    }
-    private func receiveMediaChunk(_ chunk: Data, id: UUID, offset: Int, total: Int,
-                                   socket: URLSessionWebSocketTask) async throws {
-        guard !chunk.isEmpty, chunk.count <= 256 * 1024,
-              let asset = (try await client().state()).media[id], asset.author == setup?.context.peerID,
-              total > 0, total <= asset.manifest.byteCount + 64,
-              offset == partialOffset(for: id), offset + chunk.count <= total else { throw SpaceError.invalidEnvelope }
-        let dataURL = partialDataURL(id), metadataURL = partialMetadataURL(id)
-        if offset == 0 {
-            try Data().write(to: dataURL, options: .atomic)
-            try JSONEncoder().encode(MediaPartialMetadata(total: total)).write(to: metadataURL, options: .atomic)
-        } else {
-            let metadata = try JSONDecoder().decode(MediaPartialMetadata.self, from: Data(contentsOf: metadataURL))
-            guard metadata.total == total else { throw SpaceError.invalidEnvelope }
-        }
-        let handle = try FileHandle(forWritingTo: dataURL)
-        defer { try? handle.close() }
-        try handle.seekToEnd(); try handle.write(contentsOf: chunk)
-        let received = offset + chunk.count
-        if received == total {
-            let sealed = try Data(contentsOf: dataURL, options: .mappedIfSafe)
-            try await client().receivePhotoCiphertext(sealed, id: id)
-            clearPartialMedia(id)
-            try db.transaction { try db.remove("mediaRetry", key: id.uuidString) }
-            try await client().sync(using: relay!)
-        } else {
-            try await socket.send(.string("need:\(id.uuidString):\(received)"))
-        }
-    }
-    private func finalizePartialMediaIfComplete(_ id: UUID) async -> Bool {
-        guard let metadataData = try? Data(contentsOf: partialMetadataURL(id)),
-              let metadata = try? JSONDecoder().decode(MediaPartialMetadata.self, from: metadataData),
-              partialOffset(for: id) == metadata.total else { return false }
-        do {
-            let sealed = try Data(contentsOf: partialDataURL(id), options: .mappedIfSafe)
-            try await client().receivePhotoCiphertext(sealed, id: id)
-            clearPartialMedia(id)
-            try db.transaction { try db.remove("mediaRetry", key: id.uuidString) }
-            return true
-        } catch {
-            clearPartialMedia(id)
-            return false
-        }
-    }
-    private func clearPartialMedia(_ id: UUID) {
-        try? FileManager.default.removeItem(at: partialDataURL(id))
-        try? FileManager.default.removeItem(at: partialMetadataURL(id))
-    }
-    private func cleanupPartialMedia(keeping ids: Set<UUID>) {
-        guard let files = try? FileManager.default.contentsOfDirectory(at: mediaPartialDirectory,
-                                                                        includingPropertiesForKeys: nil) else { return }
-        for file in files {
-            let stem = file.deletingPathExtension().lastPathComponent
-            if UUID(uuidString: stem).map({ !ids.contains($0) }) ?? true { try? FileManager.default.removeItem(at: file) }
-        }
     }
     public func state() async throws -> SharedState { try await client().state() }
     public func retainedState() async throws -> SharedState {
@@ -565,21 +405,9 @@ public actor NetworkPair {
     public func createSticker(_ data: Data, kind: String, width: Int, height: Int) async throws {
         _ = try await client().createSticker(data, kind: kind, width: width, height: height)
     }
-    public func createVideo(_ data: Data, kind: String, width: Int, height: Int) async throws {
-        _ = try await client().createSticker(data, kind: kind, width: width, height: height)
-    }
-    public func createAudio(_ data: Data) async throws {
-        _ = try await client().createSticker(data, kind: "audio/mp4", width: 1, height: 1)
-    }
     public func createMemoryWithPhoto(_ memory: MemoryContent, jpeg: Data,
                                       width: Int, height: Int, id: UUID) async throws {
         _ = try await client().createWithPhoto(.journal(.memory(memory)), jpeg: jpeg,
-                                               width: width, height: height,
-                                               objectID: id, destination: .memory)
-    }
-    public func createMemoryWithVideo(_ memory: MemoryContent, data: Data, kind: String,
-                                      width: Int, height: Int, id: UUID) async throws {
-        _ = try await client().createWithMedia(.journal(.memory(memory)), data: data, kind: kind,
                                                width: width, height: height,
                                                objectID: id, destination: .memory)
     }
@@ -588,38 +416,6 @@ public actor NetworkPair {
         try await client().updateProfile(name: name, avatar: avatar, retainedAvatarID: retainedAvatarID)
     }
     public func photoData(_ id: UUID) async throws -> Data? { try await client().photoData(id) }
-    public func interruptedMediaIDs() async throws -> Set<UUID> {
-        let state = try await client().state()
-        let missing = Set(try await client().missingPeerPhotoIDs().filter {
-            state.media[$0]?.manifest.kind.hasPrefix("image/") == true
-        })
-        return try Set(db.entries("mediaRetry").compactMap { key, data in
-            guard let id = UUID(uuidString: key), missing.contains(id),
-                  try JSONDecoder().decode(MediaRetryRecord.self, from: data).attempts >= 2 else { return nil }
-            return id
-        })
-    }
-    public func mediaProgress() async throws -> [UUID: Double] {
-        let state = try await client().state()
-        let missing = Set(try await client().missingPeerPhotoIDs().filter {
-            state.media[$0]?.manifest.kind.hasPrefix("image/") == true
-        })
-        return missing.reduce(into: [:]) { result, id in
-            guard let metadata = try? JSONDecoder().decode(MediaPartialMetadata.self,
-                                                            from: Data(contentsOf: partialMetadataURL(id))),
-                  metadata.total > 0 else { return }
-            result[id] = min(1, Double(partialOffset(for: id)) / Double(metadata.total))
-        }
-    }
-    public func retryMedia(_ id: UUID) async throws {
-        let state = try await client().state()
-        guard state.media[id]?.manifest.kind.hasPrefix("image/") == true,
-              try await client().missingPeerPhotoIDs().contains(id) else { return }
-        try db.transaction { try db.remove("mediaRetry", key: id.uuidString) }
-        mediaSocket?.cancel(with: .goingAway, reason: nil)
-        mediaSocket = nil
-        try await synchronize()
-    }
     public func pendingCount() async throws -> Int { try await client().unconfirmedEventCount() }
     public func sendAffection(_ kind: AffectionKind) async throws -> Bool { try await client().sendAffection(kind) }
     public func respondToAffection(_ id: UUID) async throws -> Bool { try await client().respondToAffection(envelopeID: id) }

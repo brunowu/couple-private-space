@@ -27,8 +27,6 @@ import Vision
     @Published var inviteExpiry: Date?
     @Published var peerDeviceID: UUID?
     @Published var deliveries: [UUID: DeliveryState] = [:]
-    @Published var interruptedMediaIDs: Set<UUID> = []
-    @Published var mediaProgress: [UUID: Double] = [:]
     @Published var reminderStatus = "愿望提醒尚未开启。"
     @Published var affection: Affection?
     @Published var capsuleDrafts: [CapsuleDraft] = []
@@ -117,8 +115,6 @@ import Vision
             do {
                 state = try await client.state(); pending = try await client.pendingCount()
                 deliveries = try await client.deliveries()
-                interruptedMediaIDs = try await client.interruptedMediaIDs()
-                mediaProgress = try await client.mediaProgress()
                 capsuleDrafts = try await client.capsuleDrafts()
                 privateCycle = try await client.privateCycle()
                 openedCapsules = try await client.openedCapsules()
@@ -162,18 +158,6 @@ import Vision
         await refresh()
         Task { await self.sync() }
     }
-    func saveVideo(_ data: Data, kind: String, width: Int, height: Int) async throws {
-        guard let client else { throw SpaceError.notPaired }
-        try await client.createVideo(data, kind: kind, width: width, height: height)
-        await refresh()
-        Task { await self.sync() }
-    }
-    func saveAudio(_ data: Data) async throws {
-        guard let client else { throw SpaceError.notPaired }
-        try await client.createAudio(data)
-        await refresh()
-        Task { await self.sync() }
-    }
     func saveMemoryWithPhoto(_ memory: MemoryContent, jpeg: Data,
                              width: Int, height: Int, id: UUID) async throws {
         guard let client else { throw SpaceError.notPaired }
@@ -181,26 +165,9 @@ import Vision
         await refresh()
         Task { await self.sync() }
     }
-    func saveMemoryWithVideo(_ memory: MemoryContent, data: Data, kind: String,
-                             width: Int, height: Int, id: UUID) async throws {
-        guard let client else { throw SpaceError.notPaired }
-        try await client.createMemoryWithVideo(memory, data: data, kind: kind,
-                                               width: width, height: height, id: id)
-        await refresh()
-        Task { await self.sync() }
-    }
     func photoData(_ id: UUID) async throws -> Data? {
         guard let client else { throw SpaceError.notPaired }
         return try await client.photoData(id)
-    }
-    func retryMedia(_ id: UUID) async {
-        do { try await client?.retryMedia(id); lastSync = Date(); error = nil }
-        catch { self.error = error.localizedDescription }
-        await refresh()
-    }
-    func mediaTransferProgress(_ id: UUID) async -> Double? {
-        guard let client else { return nil }
-        return try? await client.mediaProgress()[id]
     }
     func createEncryptedBackup() async throws -> SpaceBackupArtifact {
         guard let client else { throw SpaceError.notPaired }
@@ -689,15 +656,10 @@ public struct NetworkSpaceView: View {
                     deliveries: model.deliveries, reminderStatus: model.reminderStatus,
                     syncStatus: !model.online ? "离线 · 内容保存在本机" : model.error != nil ? "暂未连接 · 等待重试" : model.lastSync == nil ? "等待同步" : "已连接 · 待回执 \(model.pending)",
                     photoRefresh: model.lastSync,
-                    interruptedMediaIDs: model.interruptedMediaIDs,
-                    mediaProgress: model.mediaTransferProgress,
                     save: { try await model.save($0, objectID: $1) }, privateCycle: model.privateCycle, cycle: model.cycle,
-                    savePhoto: model.savePhoto, saveSticker: model.saveSticker, saveVideo: model.saveVideo,
-                    saveAudio: model.saveAudio,
+                    savePhoto: model.savePhoto, saveSticker: model.saveSticker,
                     saveMemoryWithPhoto: model.saveMemoryWithPhoto,
-                    saveMemoryWithVideo: model.saveMemoryWithVideo,
                     loadPhoto: model.photoData,
-                    retryMedia: model.retryMedia,
                     updateProfile: model.updateProfile,
                     configureReminders: { try await model.configureReminders(enabled: $0, days: $1, quiet: $2) }, retry: model.sync,
                     affection: model.affection, sendAffection: model.sendAffection,

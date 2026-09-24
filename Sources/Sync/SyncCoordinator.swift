@@ -34,6 +34,31 @@ public actor SyncCoordinator {
         try db.transaction {
             if let old = try db.decode(PairContext.self, table: "app", key: "pair"), old != pair { throw SpaceError.unauthorized }
             try db.encode(pair, table: "app", key: "pair")
+            // One-time recovery for builds that briefly allowed audio/video media.
+            // Keep every text/image event, pairing key and shared record, but remove
+            // unsupported media from the send queue so it cannot block new messages.
+            if try db.read("app", key: "unsupportedMediaQueueCleanedV1") == nil {
+                func unsupported(_ event: DomainEvent?) -> Bool {
+                    guard let event, case .media(let manifest) = event.payload else { return false }
+                    return !manifest.kind.hasPrefix("image/")
+                }
+                for (key, bytes) in try db.entries("pending") {
+                    let event = try? JSONDecoder().decode(DomainEvent.self, from: bytes)
+                    if unsupported(event) {
+                        try db.remove("pending", key: key)
+                        if let event { try db.remove("delivery", key: event.id.uuidString) }
+                    }
+                }
+                for (key, bytes) in try db.entries("outbox") {
+                    guard let outgoing = try? JSONDecoder().decode(Outgoing.self, from: bytes),
+                          let eventID = outgoing.eventID,
+                          unsupported(try db.decode(DomainEvent.self, table: "events", key: eventID.uuidString)) else { continue }
+                    try db.remove("outbox", key: key)
+                    try db.remove("delivery", key: eventID.uuidString)
+                }
+                for (key, _) in try db.entries("mediaRetry") { try db.remove("mediaRetry", key: key) }
+                try db.write("app", key: "unsupportedMediaQueueCleanedV1", value: Data([1]))
+            }
         }
     }
     @discardableResult
@@ -81,21 +106,14 @@ public actor SyncCoordinator {
                                                      width: Int, height: Int, objectID: UUID,
                                                      destination: MediaDestination,
                                                      now: Date = Date()) throws -> DomainEvent {
-        try createWithMedia(payload, data: jpeg, kind: "image/jpeg", width: width, height: height,
-                            objectID: objectID, destination: destination, now: now)
-    }
-    @discardableResult public func createWithMedia(_ payload: EventPayload, data: Data, kind: String,
-                                                    width: Int, height: Int, objectID: UUID,
-                                                    destination: MediaDestination,
-                                                    now: Date = Date()) throws -> DomainEvent {
         switch (payload, destination) {
         case (.journal(.memory(let memory)), .memory) where memory.mediaID == objectID: break
         case (.journal(.sealCapsule(let capsule)), .capsule) where capsule.mediaID == objectID: break
         case (.profile(let profile), .avatar) where profile.avatarID == objectID: break
         default: throw SpaceError.invalidInput
         }
-        let (manifest, sealed) = try prepareMedia(data, kind: kind, width: width, height: height,
-                                                  destination: destination)
+        let (manifest, sealed) = try preparePhoto(jpeg, width: width, height: height,
+                                                   destination: destination)
         return try db.transaction {
             guard try db.read("mediaBlobs", key: objectID.uuidString) == nil else { throw SpaceError.conflict }
             try db.write("mediaBlobs", key: objectID.uuidString, value: sealed)
@@ -108,10 +126,6 @@ public actor SyncCoordinator {
         let payload = EventPayload.journal(.sealCapsule(draft.content))
         if let jpeg = draft.photoJPEG, let width = draft.photoWidth, let height = draft.photoHeight {
             _ = try createWithPhoto(payload, jpeg: jpeg, width: width, height: height,
-                                    objectID: draft.id, destination: .capsule, now: now)
-        } else if let data = draft.videoData, let kind = draft.videoKind,
-                  let width = draft.videoWidth, let height = draft.videoHeight {
-            _ = try createWithMedia(payload, data: data, kind: kind, width: width, height: height,
                                     objectID: draft.id, destination: .capsule, now: now)
         } else {
             _ = try create(payload, objectID: draft.id, now: now)
@@ -139,7 +153,7 @@ public actor SyncCoordinator {
     }
     public func missingPeerPhotoIDs() throws -> [UUID] {
         try state().media.values.compactMap { asset in
-            guard asset.author == pair.peerID,
+            guard asset.author == pair.peerID, asset.manifest.kind.hasPrefix("image/"),
                   try db.read("mediaBlobs", key: asset.id.uuidString) == nil else { return nil }
             return asset.id
         }

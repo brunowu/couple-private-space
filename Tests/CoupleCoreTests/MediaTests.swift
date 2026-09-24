@@ -101,28 +101,6 @@ import Sync
     #expect(try await c.b.photoData(draft.id) == jpeg)
 }
 
-@Test func audioAndVideoAttachmentsUseTheExistingEncryptedMediaPipeline() async throws {
-    let c = try Clients(); defer { try? FileManager.default.removeItem(at: c.dir) }
-    let video = Data(repeating: 0x5a, count: 4_096)
-    let memoryID = UUID()
-    let memory = MemoryContent(title: "一段视频", text: "", date: Date(),
-                               sourceID: memoryID, mediaID: memoryID)
-    _ = try await c.a.createWithMedia(.journal(.memory(memory)), data: video, kind: "video/mp4",
-                                      width: 720, height: 1_280, objectID: memoryID, destination: .memory)
-    let draft = CapsuleDraft(title: "未来的视频", text: "", opensAt: Date().addingTimeInterval(3_600),
-                             videoData: video, videoKind: "video/mp4", videoWidth: 720, videoHeight: 1_280)
-    try await c.a.saveCapsuleDraft(draft)
-    try await c.a.sealCapsuleDraft(draft)
-    #expect(try await c.a.state().media[memoryID]?.manifest.kind == "video/mp4")
-    #expect(try await c.a.state().media[draft.id]?.destination == .capsule)
-    #expect(try await c.a.photoData(memoryID) == video)
-    #expect(try await c.a.photoData(draft.id) == video)
-    let audio = Data(repeating: 0x33, count: 2_048)
-    let audioEvent = try await c.a.createSticker(audio, kind: "audio/mp4", width: 1, height: 1)
-    #expect(try await c.a.state().media[audioEvent.objectID]?.manifest.kind == "audio/mp4")
-    #expect(try await c.a.photoData(audioEvent.objectID) == audio)
-}
-
 @Test func namesAndAvatarsSyncAsEncryptedProfilesWithoutChatArtifacts() async throws {
     let c = try Clients(); defer { try? FileManager.default.removeItem(at: c.dir) }
     let bitmap = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
