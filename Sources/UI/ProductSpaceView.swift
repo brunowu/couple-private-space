@@ -1162,7 +1162,7 @@ public struct ProductSpaceView: View {
                     Text(pairingCode).font(.headline.monospaced()).textSelection(.enabled)
                     Text("请与伴侣在各自设备上逐组核对。若号码不同，请停止共享；更换设备后也需要重新核验。")
                         .font(.footnote).foregroundStyle(.secondary)
-                    Text("换机和备份迁移尚未开放。请先保留旧设备与本机数据，不要通过清空单侧资料尝试重新配对。")
+                    Text("换机前请先在每台手机分别创建自己的加密备份。恢复入口只会出现在全新、尚未配对的安装中。")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 if let showPairingFinal {
@@ -1196,7 +1196,7 @@ public struct ProductSpaceView: View {
                         .font(.footnote).foregroundStyle(.secondary)
                 }
                 Text(backupStatus).font(.footnote).foregroundStyle(.secondary)
-                Text("当前版本只允许在这里创建和校验。不会覆盖当前配对；恢复仅用于全新的空白安装。")
+                Text("每台手机都应创建并保留自己的备份。这里不会覆盖当前配对；恢复入口只会出现在全新、尚未配对的安装中。")
                     .font(.footnote).foregroundStyle(.secondary)
             }
             Section("后台通知") {

@@ -40,4 +40,10 @@ public final class KeychainVault: KeyVault {
         }
         guard status == errSecSuccess else { throw VaultError.keychain(status) }
     }
+
+    /// Used only by the guarded empty-install restore flow.
+    public func remove(_ name: String) throws {
+        let status = SecItemDelete(query(name) as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else { throw VaultError.keychain(status) }
+    }
 }

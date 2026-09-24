@@ -179,9 +179,49 @@ import Vision
 
     func verifyEncryptedBackup(fileURL: URL, recoveryKey: String) async throws -> SpaceBackupPreview {
         guard let client else { throw SpaceError.notPaired }
+        let access = fileURL.startAccessingSecurityScopedResource()
+        defer { if access { fileURL.stopAccessingSecurityScopedResource() } }
         let preview = try await client.verifyEncryptedBackup(fileURL: fileURL, recoveryKey: recoveryKey)
         backupStatus = "备份完整且密钥正确。校验过程没有修改当前空间。"
         return preview
+    }
+
+    /// Restores only while this installation is still an unpaired, empty shell.
+    func restoreEncryptedBackup(fileURL: URL, recoveryKey: String) async throws -> SpaceBackupPreview {
+        guard stage == "new", let status = await client?.status(), status.stage == "new" else {
+            throw SpaceBackupError.destinationNotEmpty
+        }
+        busy = true; defer { busy = false }
+        let preview = try await verifyEncryptedBackup(fileURL: fileURL, recoveryKey: recoveryKey)
+        let directory = try FileManager.default.url(for: .applicationSupportDirectory,
+            in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("NetworkSpace")
+        let vault = KeychainVault(service: "private.couple.network.v2")
+        let secretNames = ["network.database", "network.auth", "identity.\(preview.localDeviceID.uuidString)"]
+
+        client = nil
+        try? FileManager.default.removeItem(at: directory)
+        for name in secretNames { try vault.remove(name) }
+        do {
+            let access = fileURL.startAccessingSecurityScopedResource()
+            defer { if access { fileURL.stopAccessingSecurityScopedResource() } }
+            let restored = try SpaceBackupService.restore(fileURL: fileURL, recoveryKey: recoveryKey,
+                                                           directory: directory, vault: vault)
+            client = try NetworkPair(directory: directory, vault: vault)
+            await refresh()
+            guard stage == "paired" else { throw SpaceBackupError.damagedPayload }
+            backupStatus = "已从加密备份恢复这台设备的配对、密钥和全部内容。"
+            await updatePushRegistration()
+            Task { await self.sync() }
+            return restored
+        } catch {
+            // Recovery failure may not leave a partial identity behind. Recreate a clean shell.
+            client = nil
+            try? FileManager.default.removeItem(at: directory)
+            for name in secretNames { try? vault.remove(name) }
+            client = try? NetworkPair(directory: directory, vault: vault)
+            await refresh()
+            throw error
+        }
     }
     func updateProfile(name: String, avatar: (jpeg: Data, width: Int, height: Int)?,
                        retainedAvatarID: UUID?) async throws {
@@ -589,6 +629,12 @@ public struct NetworkSpaceView: View {
     @State private var previewCode: String?
     @State private var codeConfirmed = false
     @State private var selectedPhoto: PhotosPickerItem?
+    @State private var showingRestoreImporter = false
+    @State private var showingRestoreSheet = false
+    @State private var restoreURL: URL?
+    @State private var restoreKey = ""
+    @State private var restorePreview: SpaceBackupPreview?
+    @State private var restoreError: String?
     public init() {}
     public var body: some View {
         VStack(spacing: 0) {
@@ -681,6 +727,11 @@ public struct NetworkSpaceView: View {
                                     Text("创建空间").tag(true)
                                     Text("加入空间").tag(false)
                                 }.pickerStyle(.segmented)
+                                Button { showingRestoreImporter = true } label: {
+                                    Label("从完整加密备份恢复", systemImage: "arrow.counterclockwise.circle")
+                                }
+                                Text("仅适用于还没有建立配对的空白安装；不会覆盖已有空间。")
+                                    .font(.footnote).foregroundStyle(.secondary)
                             }
                         }
                         if model.stage == "creating" || (model.stage == "new" && createHere) {
@@ -781,6 +832,48 @@ public struct NetworkSpaceView: View {
                 payload(model.output)
             }.navigationTitle("最后一步 · 交给伴侣").toolbar { Button("完成") { showFinal = false } } }
         }
+        .fileImporter(isPresented: $showingRestoreImporter, allowedContentTypes: [.data]) { result in
+            switch result {
+            case .success(let url):
+                restoreURL = url; restoreKey = ""; restorePreview = nil; restoreError = nil
+                showingRestoreSheet = true
+            case .failure(let error): restoreError = error.localizedDescription
+            }
+        }
+        .sheet(isPresented: $showingRestoreSheet) {
+            NavigationStack {
+                Form {
+                    Section("恢复密钥") {
+                        SecureField("CPS1-…", text: $restoreKey)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                    }
+                    if let preview = restorePreview {
+                        Section("已验证的备份") {
+                            Text(preview.createdAt.formatted(date: .abbreviated, time: .shortened))
+                            LabeledContent("消息", value: "\(preview.messageCount)")
+                            LabeledContent("媒体", value: "\(preview.photoCount)")
+                            LabeledContent("愿望", value: "\(preview.wishCount)")
+                            Button("确认恢复这个空间") { restoreSelectedBackup() }
+                                .disabled(model.busy)
+                            Text("每台手机应恢复它自己创建的备份。恢复后不要再同时使用同一设备身份的旧副本。")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    } else {
+                        Section {
+                            Button("检查备份") { verifyRestoreSelection() }
+                                .disabled(restoreKey.isEmpty || model.busy)
+                            Text("检查只读取并验证备份。确认恢复后，这台空白设备将恢复原有配对身份。")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                    }
+                    if let restoreError { Text(restoreError).foregroundStyle(.red) }
+                    if model.busy { ProgressView("正在验证…") }
+                }
+                .navigationTitle("恢复加密备份")
+                .toolbar { Button("取消") { showingRestoreSheet = false } }
+                .onChange(of: restoreKey) { _, _ in restorePreview = nil; restoreError = nil }
+            }
+        }
         .onChange(of: model.stage) { _, stage in if stage == "awaitingPeer" && model.creator { showFinal = true } }
         .task { await model.start() }
         .overlay(alignment: .bottom) {
@@ -824,6 +917,29 @@ public struct NetworkSpaceView: View {
                         }
                     }
                 }.accessibilityIdentifier("privacy-shield")
+            }
+        }
+    }
+    private func verifyRestoreSelection() {
+        guard let restoreURL else { return }
+        restorePreview = nil; restoreError = nil
+        Task {
+            do { restorePreview = try await model.verifyEncryptedBackup(fileURL: restoreURL, recoveryKey: restoreKey) }
+            catch { restoreError = "备份文件、恢复密钥或完整性校验不通过。" }
+        }
+    }
+    private func restoreSelectedBackup() {
+        guard let restoreURL, restorePreview != nil else { return }
+        restoreError = nil
+        Task {
+            do {
+                _ = try await model.restoreEncryptedBackup(fileURL: restoreURL, recoveryKey: restoreKey)
+                showingRestoreSheet = false
+            } catch SpaceBackupError.destinationNotEmpty {
+                restoreError = "只能恢复到还没有配对的空白安装。"
+            } catch {
+                restorePreview = nil
+                restoreError = "恢复未完成；这台设备仍保持空白状态。"
             }
         }
     }
