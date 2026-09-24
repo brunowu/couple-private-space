@@ -223,7 +223,7 @@ export class PairObject extends DurableObject<Env> {
     }
     if (typeof message === 'string') {
       const match = /^need:([0-9a-f-]{36})(?::([0-9]{1,8}))?$/i.exec(message);
-      if (message.length > 128 || !match || !UUID.test(match[1]) || (match[2] !== undefined && Number(match[2]) > 10 * 1024 * 1024 + 64)) {
+      if (message.length > 128 || !match || !UUID.test(match[1]) || (match[2] !== undefined && Number(match[2]) > 25 * 1024 * 1024 + 64)) {
         socket.close(1008, 'invalid request'); return;
       }
     } else {

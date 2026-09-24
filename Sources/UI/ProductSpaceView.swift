@@ -7,6 +7,7 @@ import QuickLook
 import UserNotifications
 import ImageIO
 import UniformTypeIdentifiers
+import AVKit
 
 enum SpaceStyle {
     static let accent = Color(uiColor: UIColor { traits in
@@ -99,6 +100,7 @@ public struct ProductSpaceView: View {
     let save: (EventPayload, UUID) async throws -> Void
     let savePhoto: (Data, Int, Int) async throws -> Void
     let saveSticker: (Data, String, Int, Int) async throws -> Void
+    let saveVideo: (Data, String, Int, Int) async throws -> Void
     let saveMemoryWithPhoto: (MemoryContent, Data, Int, Int, UUID) async throws -> Void
     let loadPhoto: (UUID) async throws -> Data?
     let updateProfile: (String, (jpeg: Data, width: Int, height: Int)?, UUID?) async throws -> Void
@@ -159,6 +161,7 @@ public struct ProductSpaceView: View {
     @State private var tab = 0
     @State private var draft = ""
     @State private var selectedChatPhotos: [PhotosPickerItem] = []
+    @State private var selectedChatVideo: PhotosPickerItem?
     @State private var showingChatCamera = false
     @State private var showingStickerLibrary = false
     @StateObject private var stickerLibrary = StickerLibrary()
@@ -209,6 +212,7 @@ public struct ProductSpaceView: View {
                 privateCycle: CycleEntry?, cycle: @escaping (CycleEntry) async throws -> Void,
                 savePhoto: @escaping (Data, Int, Int) async throws -> Void,
                 saveSticker: @escaping (Data, String, Int, Int) async throws -> Void,
+                saveVideo: @escaping (Data, String, Int, Int) async throws -> Void = { _, _, _, _ in },
                 saveMemoryWithPhoto: @escaping (MemoryContent, Data, Int, Int, UUID) async throws -> Void,
                 loadPhoto: @escaping (UUID) async throws -> Data?,
                 retryMedia: @escaping (UUID) async -> Void = { _ in },
@@ -235,7 +239,7 @@ public struct ProductSpaceView: View {
         self.state = state; self.localID = localID; self.peerDeviceID = peerDeviceID
         self.pairingCode = pairingCode; self.showPairingFinal = showPairingFinal; self.isCycleOwner = isCycleOwner
         self.deliveries = deliveries; self.save = save; self.cycle = cycle
-        self.savePhoto = savePhoto; self.saveSticker = saveSticker
+        self.savePhoto = savePhoto; self.saveSticker = saveSticker; self.saveVideo = saveVideo
         self.saveMemoryWithPhoto = saveMemoryWithPhoto; self.loadPhoto = loadPhoto
         self.updateProfile = updateProfile
         self.privateCycle = privateCycle
@@ -419,6 +423,9 @@ public struct ProductSpaceView: View {
         .onChange(of: selectedChatPhotos) { _, photos in
             if !photos.isEmpty { Task { await sendSelectedPhotos(photos) } }
         }
+        .onChange(of: selectedChatVideo) { _, video in
+            if let video { Task { await sendSelectedVideo(video) } }
+        }
         .fileImporter(isPresented: $showingBackupImporter, allowedContentTypes: [.data]) { result in
             switch result {
             case .success(let url):
@@ -532,7 +539,7 @@ public struct ProductSpaceView: View {
     }
     private var chatPhotoIDs: [UUID] {
         chatEntries.compactMap { entry in
-            if case .photo(let asset) = entry.content { return asset.id }
+            if case .photo(let asset) = entry.content, !asset.manifest.kind.hasPrefix("video/") { return asset.id }
             return nil
         }
     }
@@ -577,7 +584,7 @@ public struct ProductSpaceView: View {
                 } else if value.replyTo != nil {
                     content = "↩︎ 回复一条暂不可用的消息\n\(body)"
                 } else { content = body }
-            case .photo: content = "[照片]"
+            case .photo(let asset): content = asset.manifest.kind.hasPrefix("video/") ? "[视频]" : "[照片]"
             }
             return "[\(time)] \(name(for: entry.author))：\(content)"
         }.joined(separator: "\n\n")
@@ -752,6 +759,22 @@ public struct ProductSpaceView: View {
             failure = error as? SpaceError == .capacity ? "照片处理后仍超过 2 MB，请重试。" : "无法使用这张照片，请重试。"
         }
     }
+    private func sendSelectedVideo(_ selection: PhotosPickerItem) async {
+        photoSending = true
+        defer { photoSending = false; selectedChatVideo = nil }
+        do {
+            guard let picked = try await selection.loadTransferable(type: PickedVideo.self) else { throw SpaceError.invalidInput }
+            defer { try? FileManager.default.removeItem(at: picked.url) }
+            let video = try await VideoImport.prepare(picked.url)
+            let kind = selection.supportedContentTypes.contains(where: { $0.conforms(to: .mpeg4Movie) })
+                ? "video/mp4" : "video/quicktime"
+            try await saveVideo(video.data, kind, video.width, video.height)
+        } catch {
+            failure = error as? SpaceError == .capacity
+                ? "视频需在 30 秒、25 MB 以内。"
+                : "无法读取或发送这个视频，请换一个再试。"
+        }
+    }
     private func sendSticker(_ sticker: InstalledSticker) async {
         photoSending = true
         defer { photoSending = false }
@@ -850,6 +873,15 @@ public struct ProductSpaceView: View {
                                                 }
                                         }
                                     case .photo(let asset):
+                                        if asset.manifest.kind.hasPrefix("video/") {
+                                            VideoBubble(id: asset.id, kind: asset.manifest.kind,
+                                                        width: asset.manifest.width, height: asset.manifest.height,
+                                                        load: loadPhoto, refresh: photoRefresh,
+                                                        interrupted: interruptedMediaIDs.contains(asset.id),
+                                                        progress: { await mediaProgress(asset.id) },
+                                                        retry: { await retryMedia(asset.id) })
+                                                .contextMenu { reactionMenu(targetID: asset.id) }
+                                        } else {
                                         PhotoBubble(id: asset.id, kind: asset.manifest.kind,
                                                     load: loadPhoto, refresh: photoRefresh,
                                                     interrupted: interruptedMediaIDs.contains(asset.id),
@@ -866,6 +898,7 @@ public struct ProductSpaceView: View {
                                                     rememberPhoto(asset.id)
                                                 }
                                             }
+                                        }
                                     }
                                     reactionStrip(targetID: entry.id)
                                     if let createdAt = entryCreatedAt(entry) {
@@ -949,6 +982,9 @@ public struct ProductSpaceView: View {
                                  selectionBehavior: .ordered, matching: .images) {
                         Label("相册", systemImage: "photo.on.rectangle")
                     }.disabled(photoSending).accessibilityLabel("从相册选择").accessibilityIdentifier("chat-photo-picker")
+                    PhotosPicker(selection: $selectedChatVideo, matching: .videos) {
+                        Label("视频", systemImage: "video")
+                    }.disabled(photoSending).accessibilityLabel("从相册选择短视频")
                     Spacer(minLength: 0)
                 }
                 .font(.subheadline.weight(.medium))
@@ -1597,6 +1633,86 @@ private struct ContentComposer: View {
         }
     }
 }
+private struct VideoBubble: View {
+    let id: UUID
+    let kind: String
+    let width: Int
+    let height: Int
+    let load: (UUID) async throws -> Data?
+    let refresh: Date?
+    var interrupted = false
+    var progress: () async -> Double? = { nil }
+    var retry: () async -> Void = {}
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var player: AVPlayer?
+    @State private var temporaryURL: URL?
+    @State private var transferProgress: Double?
+    @State private var timedOut = false
+    @State private var retryNonce = 0
+    @State private var isVisible = true
+
+    private var showsRetry: Bool { interrupted || timedOut }
+
+    var body: some View {
+        Group {
+            if let player {
+                VideoPlayer(player: player)
+                    .aspectRatio(CGFloat(width) / CGFloat(height), contentMode: .fit)
+                    .frame(maxWidth: 240, maxHeight: 280)
+                    .clipShape(RoundedRectangle(cornerRadius: 18))
+            } else {
+                VStack(spacing: 10) {
+                    Label(showsRetry ? "视频传输暂时中断" : "正在安全传输视频", systemImage: "video")
+                    if let transferProgress, transferProgress > 0 {
+                        ProgressView(value: transferProgress).frame(width: 130)
+                        Text("\(Int(transferProgress * 100))%").font(.caption2).monospacedDigit()
+                    }
+                    if showsRetry {
+                        Button("重试") {
+                            timedOut = false; retryNonce += 1
+                            Task { await retry() }
+                        }.buttonStyle(.bordered).controlSize(.small)
+                    }
+                }
+                .font(.subheadline).foregroundStyle(.secondary)
+                .frame(width: 220, height: 150)
+                .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 18))
+            }
+        }
+        .onScrollVisibilityChange(threshold: 0.05) {
+            isVisible = $0
+            if !$0 { player?.pause() }
+        }
+        .onChange(of: scenePhase) { _, phase in if phase != .active { player?.pause() } }
+        .task(id: "\(scenePhase)-\(refresh?.timeIntervalSince1970 ?? 0)-\(retryNonce)") {
+            guard scenePhase == .active else { return }
+            for attempt in 0..<12 {
+                if let data = try? await load(id) {
+                    do {
+                        let ext = kind == "video/mp4" ? "mp4" : "mov"
+                        let url = FileManager.default.temporaryDirectory.appendingPathComponent("couple-\(id.uuidString).\(ext)")
+                        try? FileManager.default.removeItem(at: url)
+                        try data.write(to: url, options: .atomic)
+                        try? FileManager.default.setAttributes([.protectionKey: FileProtectionType.complete], ofItemAtPath: url.path)
+                        temporaryURL = url; player = AVPlayer(url: url); timedOut = false
+                    } catch { timedOut = true }
+                    break
+                }
+                transferProgress = await progress()
+                if attempt == 11 { timedOut = true; break }
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled, scenePhase == .active else { break }
+            }
+        }
+        .onDisappear {
+            player?.pause(); player = nil
+            if let temporaryURL { try? FileManager.default.removeItem(at: temporaryURL) }
+            temporaryURL = nil
+        }
+        .accessibilityIdentifier("chat-video")
+    }
+}
+
 private struct PhotoBubble: View {
     let id: UUID
     let kind: String
