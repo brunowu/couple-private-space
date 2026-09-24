@@ -555,7 +555,14 @@ public struct ProductSpaceView: View {
             let time = entryCreatedAt(entry)?.formatted(date: .numeric, time: .shortened) ?? "时间未记录"
             let content: String
             switch entry.content {
-            case .text(let value): content = StickerReference.stickerID(from: value.text) == nil ? value.text : "[表情]"
+            case .text(let value):
+                let body = StickerReference.stickerID(from: value.text) == nil ? value.text : "[表情]"
+                if let replyID = value.replyTo, let original = state.messages[replyID] {
+                    let excerpt = original.text.replacingOccurrences(of: "\n", with: " ").prefix(120)
+                    content = "↩︎ 回复 \(name(for: original.author))：\(excerpt)\n\(body)"
+                } else if value.replyTo != nil {
+                    content = "↩︎ 回复一条暂不可用的消息\n\(body)"
+                } else { content = body }
             case .photo: content = "[照片]"
             }
             return "[\(time)] \(name(for: entry.author))：\(content)"
@@ -622,7 +629,31 @@ public struct ProductSpaceView: View {
         }
     }
     @ViewBuilder private func messageBody(_ message: Message) -> some View {
-        if let stickerID = StickerReference.stickerID(from: message.text) {
+        if let replyID = message.replyTo {
+            VStack(alignment: .leading, spacing: 8) {
+                if let original = state.messages[replyID] {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(name(for: original.author)).font(.caption2.weight(.semibold))
+                        Text(original.text.replacingOccurrences(of: "\n", with: " "))
+                            .font(.caption).lineLimit(2)
+                    }
+                    .foregroundStyle(.secondary)
+                    .padding(.leading, 8)
+                    .overlay(alignment: .leading) { Capsule().fill(SpaceStyle.accent).frame(width: 3) }
+                } else {
+                    Text("原消息暂不可用").font(.caption).foregroundStyle(.secondary)
+                        .padding(.leading, 8)
+                        .overlay(alignment: .leading) { Capsule().fill(SpaceStyle.accent).frame(width: 3) }
+                }
+                messageContent(message.text, parseLegacyQuote: false)
+            }
+        } else {
+            messageContent(message.text, parseLegacyQuote: true)
+        }
+    }
+
+    @ViewBuilder private func messageContent(_ text: String, parseLegacyQuote: Bool) -> some View {
+        if let stickerID = StickerReference.stickerID(from: text) {
             if let sticker = stickerLibrary.sticker(id: stickerID) {
                 LocalStickerBubble(sticker: sticker)
             } else {
@@ -630,15 +661,15 @@ public struct ProductSpaceView: View {
                     .font(.caption).foregroundStyle(.secondary).frame(width: 150, height: 100)
             }
         } else {
-            let pieces = message.text.components(separatedBy: "\n\n")
-            if let first = pieces.first, first.hasPrefix("> "), pieces.count > 1 {
+            let pieces = text.components(separatedBy: "\n\n")
+            if parseLegacyQuote, let first = pieces.first, first.hasPrefix("> "), pieces.count > 1 {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(String(first.dropFirst(2))).font(.caption).foregroundStyle(.secondary)
                         .padding(.leading, 8).overlay(alignment: .leading) { Capsule().fill(SpaceStyle.accent).frame(width: 3) }
                     Text(pieces.dropFirst().joined(separator: "\n\n")).textSelection(.enabled)
                 }
             } else {
-                Text(message.text).textSelection(.enabled)
+                Text(text).textSelection(.enabled)
             }
         }
     }
@@ -869,13 +900,12 @@ public struct ProductSpaceView: View {
                         .accessibilityIdentifier("message-draft")
                     Button {
                     let raw = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                    let text = quotedMessage.map { message in
-                        let excerpt = message.text.replacingOccurrences(of: "\n", with: " ").prefix(120)
-                        return "> \(name(for: message.author))：\(excerpt)\n\n\(raw)"
-                    } ?? raw
+                    let payload: EventPayload = quotedMessage.map {
+                        .messageV2(MessageContent(text: raw, replyTo: $0.id))
+                    } ?? .message(text: raw)
                     sending = true
                     Task {
-                        do { try await save(.message(text: text), UUID()); draft = ""; quotedMessage = nil; chatFocused = false }
+                        do { try await save(payload, UUID()); draft = ""; quotedMessage = nil; chatFocused = false }
                         catch { failure = "内容未保存，请重试。输入仍保留。" }
                         sending = false
                     }

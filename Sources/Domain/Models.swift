@@ -69,12 +69,21 @@ public struct SharedCycleProjection: Codable, Equatable, Sendable {
 
 public enum EventPayload: Codable, Equatable, Sendable {
     case message(text: String)
+    case messageV2(MessageContent)
     case media(MediaManifest)
     case profile(ProfileContent)
     case wishCreated(text: String)
     case wishStatus(WishStatus)
     case cycle(SharedCycleProjection)
     case journal(JournalOperation)
+}
+
+public struct MessageContent: Codable, Equatable, Sendable {
+    public let text: String
+    public let replyTo: UUID?
+    public init(text: String, replyTo: UUID? = nil) {
+        self.text = text; self.replyTo = replyTo
+    }
 }
 
 /// Sent through the Signal session; the media bytes themselves never enter the mailbox.
@@ -164,11 +173,12 @@ public struct DomainEvent: Codable, Equatable, Sendable {
             self.schemaVersion = 4
         } else if case .journal(.sealCapsule(let capsule)) = payload, capsule.partnerSlotID != nil || capsule.companionOf != nil {
             self.schemaVersion = 3
+        } else if case .messageV2 = payload { self.schemaVersion = 8
         } else if case .journal = payload { self.schemaVersion = 2 } else { self.schemaVersion = 1 }
     }
     public var version: Version { Version(clock: lamport, author: author, event: id) }
     public func validate(cycleOwner: UUID?) throws {
-        guard (1...7).contains(schemaVersion) else { throw SpaceError.unsupportedVersion }
+        guard (1...8).contains(schemaVersion) else { throw SpaceError.unsupportedVersion }
         guard sequence > 0, lamport > 0, lamport < UInt64.max, sequence < UInt64.max,
               createdAt.timeIntervalSince1970.isFinite else { throw SpaceError.invalidInput }
         switch payload {
@@ -183,6 +193,10 @@ public struct DomainEvent: Codable, Equatable, Sendable {
         case .message(let text), .wishCreated(let text):
             guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   text.utf8.count <= 16_384 else { throw SpaceError.invalidInput }
+        case .messageV2(let content):
+            guard schemaVersion >= 8, content.replyTo != objectID,
+                  !content.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  content.text.utf8.count <= 16_384 else { throw SpaceError.invalidInput }
         case .wishStatus: break
         case .journal(let operation):
             guard schemaVersion >= 2 else { throw SpaceError.unsupportedVersion }
@@ -214,9 +228,11 @@ public struct Message: Codable, Equatable, Sendable {
     public let version: Version
     /// Nil only for materialized views written by versions before message timestamps.
     public let createdAt: Date?
-    public init(id: UUID, author: UUID, text: String, version: Version, createdAt: Date? = nil) {
+    public let replyTo: UUID?
+    public init(id: UUID, author: UUID, text: String, version: Version, createdAt: Date? = nil,
+                replyTo: UUID? = nil) {
         self.id = id; self.author = author; self.text = text
-        self.version = version; self.createdAt = createdAt
+        self.version = version; self.createdAt = createdAt; self.replyTo = replyTo
     }
 }
 public struct Wish: Codable, Equatable, Sendable {
@@ -263,6 +279,12 @@ public struct SharedState: Codable, Equatable, Sendable {
         case .message(let text):
             let value = Message(id: event.objectID, author: event.author, text: text,
                                 version: event.version, createdAt: event.createdAt)
+            if let old = messages[value.id], old != value { throw SpaceError.conflict }
+            messages[value.id] = value
+        case .messageV2(let content):
+            let value = Message(id: event.objectID, author: event.author, text: content.text,
+                                version: event.version, createdAt: event.createdAt,
+                                replyTo: content.replyTo)
             if let old = messages[value.id], old != value { throw SpaceError.conflict }
             messages[value.id] = value
         case .wishCreated(let text):

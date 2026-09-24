@@ -82,6 +82,17 @@ struct Clients {
     #expect(try await c.a.state().messages[reply.objectID]?.text == "好呀")
 }
 
+@Test func structuredReplyKeepsItsOriginalMessageLinkAcrossSync() async throws {
+    let c = try Clients(); defer { try? FileManager.default.removeItem(at: c.dir) }
+    let original = try await c.a.create(.message(text: "今晚吃什么？"))
+    try await c.a.sync(using: c.relay); try await c.b.sync(using: c.relay)
+    let reply = try await c.b.create(.messageV2(MessageContent(text: "吃火锅", replyTo: original.objectID)))
+    try await c.b.sync(using: c.relay); try await c.a.sync(using: c.relay)
+    let received = try #require(try await c.a.state().messages[reply.objectID])
+    #expect(received.text == "吃火锅")
+    #expect(received.replyTo == original.objectID)
+}
+
 @Test func changingReminderWindowKeepsIdentityAndNeverReplaysElapsedReminders() async throws {
     let c = try Clients(); defer { try? FileManager.default.removeItem(at: c.dir) }
     let now = Date()

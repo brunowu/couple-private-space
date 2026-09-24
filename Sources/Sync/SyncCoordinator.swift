@@ -503,7 +503,7 @@ public actor SyncCoordinator {
         let alertKind: Envelope.AlertKind?
         if case .event(let event) = body {
             switch event.payload {
-            case .message: alertKind = .message
+            case .message, .messageV2: alertKind = .message
             case .wishCreated: alertKind = .wish
             case .media(let manifest) where manifest.destination == .chat: alertKind = .message
             default: alertKind = nil
