@@ -28,6 +28,13 @@ async function signed(c: Client, path: string, method: string, value?: unknown) 
  return new Request(base+path,{method,headers:{'x-device-id':c.deviceID,'x-challenge':challenge.nonce,'x-signature':signature},body:method==='GET'?undefined:body});
 }
 const send = async (c: Client,path:string,method:string,value?:unknown) => dispatch(await signed(c,path,method,value));
+async function mediaSocket(c: Client) {
+ const req=await signed(c,'/v1/media/socket','GET'); req.headers.set('upgrade','websocket');
+ const response=await SELF.fetch(req); expect(response.status).toBe(101);
+ const socket=response.webSocket!; socket.accept(); return socket;
+}
+const nextMessage = (socket: WebSocket) => new Promise<string | ArrayBuffer | Blob>(resolve =>
+ socket.addEventListener('message', event => resolve(event.data as string | ArrayBuffer | Blob), { once: true }));
 let a:Client,b:Client,pairID:string;
 const envelope = () => ({wireVersion:1,pairID,epoch:1,sender:a.deviceID,recipient:b.deviceID,id:crypto.randomUUID(),ciphertext:b64(crypto.getRandomValues(new Uint8Array(100)).buffer)});
 beforeAll(async()=>{
@@ -85,6 +92,18 @@ describe('authenticated temporary mailbox',()=>{
   expect(status.devices.every(d=>Object.keys(d).sort().join(',')==='authPublicJwk,deviceID,identityPublic')).toBe(true);
  });
  it('requires device authentication',async()=>{expect((await request('/v1/mailbox')).status).toBe(401);});
+ it('forwards resumable media requests and bounded binary chunks',async()=>{
+  const left=await mediaSocket(a), right=await mediaSocket(b), id=crypto.randomUUID();
+  const requestMessage=nextMessage(left); right.send(`need:${id}:262144`);
+  expect(await requestMessage).toBe(`need:${id}:262144`);
+  const header=encoder.encode(`chunk:${id}:0000262144:0003145728:`), payload=new Uint8Array([1,2,3,4]);
+  const frame=new Uint8Array(header.length+payload.length); frame.set(header); frame.set(payload,header.length);
+  const chunkMessage=nextMessage(right); left.send(frame.buffer);
+  const received=await chunkMessage;
+  const bytes=received instanceof Blob ? await received.arrayBuffer() : received as ArrayBuffer;
+  expect(new Uint8Array(bytes)).toEqual(frame);
+  left.close(); right.close();
+ });
  it('cannot bootstrap a second pair',async()=>{expect((await request('/v1/bootstrap',{method:'POST',headers:{authorization:'Bearer test-bootstrap-only-not-a-deployment-secret'},body:JSON.stringify({pairID:crypto.randomUUID(),device:pub(a)})})).status).toBe(409);});
  it('accepts same ciphertext idempotently, rejects different bytes',async()=>{
   const e=envelope();expect((await send(a,'/v1/mailbox/'+e.id,'PUT',e)).status).toBe(201);

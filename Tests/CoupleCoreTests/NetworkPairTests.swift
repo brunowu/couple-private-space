@@ -128,6 +128,18 @@ func independentClientsPairOverHTTPAndRecoverAfterRestart() async throws {
     #expect(try await a!.state().profiles[bID]?.value.name == "小卡")
     #expect(try await b!.photoData(avatarID) == jpeg)
     #expect(try await b!.state().media[avatarID]?.destination == .avatar)
+    // Exceeds the legacy relay's 2 MB single-frame ceiling, so this can arrive only
+    // through the resumable 256 KiB media protocol.
+    let existingMedia = Set(try await a!.state().media.keys)
+    let largeSticker = Data(repeating: 0xA5, count: 3 * 1024 * 1024)
+    try await a!.createSticker(largeSticker, kind: "image/gif", width: 320, height: 320)
+    let largeID = try #require(Set(try await a!.state().media.keys).subtracting(existingMedia).first)
+    try await a!.synchronize(); try await b!.synchronize()
+    for _ in 0..<50 {
+        if try await b!.photoData(largeID) != nil { break }
+        try await Task.sleep(for: .milliseconds(100))
+    }
+    #expect(try await b!.photoData(largeID) == largeSticker)
     try await b!.revokePairing()
     #expect(await b!.status().stage == "revoked")
     #expect(await b!.status().output.isEmpty)
