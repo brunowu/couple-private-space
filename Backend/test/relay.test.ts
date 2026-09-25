@@ -7,7 +7,6 @@ const encoder = new TextEncoder();
 const base = 'https://local.test';
 const b64 = (b: ArrayBuffer) => btoa(String.fromCharCode(...new Uint8Array(b)));
 const hash = async (s: string) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(s))), b => b.toString(16).padStart(2,'0')).join('');
-const hashBytes = async (bytes: Uint8Array) => Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2,'0')).join('');
 type Client = { deviceID: string; identityPublic: string; authPublicJwk: JsonWebKey; privateKey: CryptoKey };
 async function client(): Promise<Client> {
  const key = await crypto.subtle.generateKey({ name:'ECDSA', namedCurve:'P-256' },true,['sign','verify']);
@@ -29,15 +28,6 @@ async function signed(c: Client, path: string, method: string, value?: unknown) 
  return new Request(base+path,{method,headers:{'x-device-id':c.deviceID,'x-challenge':challenge.nonce,'x-signature':signature},body:method==='GET'?undefined:body});
 }
 const send = async (c: Client,path:string,method:string,value?:unknown) => dispatch(await signed(c,path,method,value));
-async function sendMedia(c: Client, id: string, method: 'PUT'|'GET'|'DELETE', bytes = new Uint8Array()) {
- const path='/v1/media/'+id;
- const response=await request('/v1/auth/challenges',{method:'POST',body:JSON.stringify({deviceID:c.deviceID})});
- const challenge=await response.json() as {nonce:string;epoch:number};
- const canonical=JSON.stringify(['couple-api-v1',challenge.nonce,method,path,await hashBytes(bytes),challenge.epoch,c.deviceID]);
- const signature=b64(await crypto.subtle.sign({name:'ECDSA',hash:'SHA-256'},c.privateKey,encoder.encode(canonical)));
- return SELF.fetch(base+path,{method,headers:{'x-device-id':c.deviceID,'x-challenge':challenge.nonce,'x-signature':signature,
-  ...(method==='PUT'?{'content-type':'application/octet-stream'}:{})},body:method==='PUT'?bytes:undefined});
-}
 let a:Client,b:Client,pairID:string;
 const envelope = () => ({wireVersion:1,pairID,epoch:1,sender:a.deviceID,recipient:b.deviceID,id:crypto.randomUUID(),ciphertext:b64(crypto.getRandomValues(new Uint8Array(100)).buffer)});
 beforeAll(async()=>{
@@ -100,17 +90,6 @@ describe('authenticated temporary mailbox',()=>{
   const e=envelope();expect((await send(a,'/v1/mailbox/'+e.id,'PUT',e)).status).toBe(201);
   expect((await send(a,'/v1/mailbox/'+e.id,'PUT',e)).status).toBe(200);
   expect((await send(a,'/v1/mailbox/'+e.id,'PUT',{...e,ciphertext:b64(new Uint8Array([3]).buffer)})).status).toBe(409);
- });
- it('stores only authenticated ciphertext media until the recipient downloads it',async()=>{
-  const id=crypto.randomUUID(), bytes=crypto.getRandomValues(new Uint8Array(1024));
-  expect((await sendMedia(a,id,'PUT',bytes)).status).toBe(201);
-  expect((await sendMedia(a,id,'PUT',bytes)).status).toBe(200);
-  expect((await sendMedia(a,id,'PUT',new Uint8Array([1]))).status).toBe(409);
-  const downloaded=await sendMedia(b,id,'GET');
-  expect(downloaded.status).toBe(200);
-  expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(bytes);
-  expect((await sendMedia(b,id,'DELETE')).status).toBe(200);
-  expect((await sendMedia(b,id,'GET')).status).toBe(404);
  });
  it('fetch does not delete; only recipient can acknowledge',async()=>{
   const e=envelope();await send(a,'/v1/mailbox/'+e.id,'PUT',e);

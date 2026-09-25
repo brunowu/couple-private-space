@@ -154,9 +154,9 @@ import Vision
         await refresh()
         Task { await self.sync() }
     }
-    func savePhoto(_ jpeg: Data, width: Int, height: Int, transferMode: MediaTransferMode) async throws {
+    func savePhoto(_ jpeg: Data, width: Int, height: Int) async throws {
         guard let client else { throw SpaceError.notPaired }
-        try await client.createPhoto(jpeg, width: width, height: height, transferMode: transferMode)
+        try await client.createPhoto(jpeg, width: width, height: height)
         await refresh()
         Task { await self.sync() }
     }

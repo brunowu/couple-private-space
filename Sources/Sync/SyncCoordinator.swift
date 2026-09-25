@@ -108,13 +108,10 @@ public actor SyncCoordinator {
         }
         try db.remove("mediaBlobs", key: targetID.uuidString)
         try db.remove("mediaRetry", key: targetID.uuidString)
-        try db.remove("mediaUploaded", key: targetID.uuidString)
     }
     @discardableResult public func createPhoto(_ jpeg: Data, width: Int, height: Int,
-                                               transferMode: MediaTransferMode = .direct,
                                                objectID: UUID = UUID(), now: Date = Date()) throws -> DomainEvent {
-        let (manifest, sealed) = try preparePhoto(jpeg, width: width, height: height,
-                                                  destination: nil, transferMode: transferMode)
+        let (manifest, sealed) = try preparePhoto(jpeg, width: width, height: height, destination: nil)
         return try db.transaction {
             guard try db.read("mediaBlobs", key: objectID.uuidString) == nil else { throw SpaceError.conflict }
             try db.write("mediaBlobs", key: objectID.uuidString, value: sealed)
@@ -122,10 +119,9 @@ public actor SyncCoordinator {
         }
     }
     @discardableResult public func createSticker(_ data: Data, kind: String, width: Int, height: Int,
-                                                 transferMode: MediaTransferMode = .direct,
                                                  objectID: UUID = UUID(), now: Date = Date()) throws -> DomainEvent {
         let (manifest, sealed) = try prepareMedia(data, kind: kind, width: width, height: height,
-                                                  destination: .chat, transferMode: transferMode)
+                                                  destination: .chat)
         return try db.transaction {
             guard try db.read("mediaBlobs", key: objectID.uuidString) == nil else { throw SpaceError.conflict }
             try db.write("mediaBlobs", key: objectID.uuidString, value: sealed)
@@ -133,19 +129,16 @@ public actor SyncCoordinator {
         }
     }
     private func preparePhoto(_ jpeg: Data, width: Int, height: Int,
-                              destination: MediaDestination?,
-                              transferMode: MediaTransferMode) throws -> (MediaManifest, Data) {
-        try prepareMedia(jpeg, kind: "image/jpeg", width: width, height: height,
-                         destination: destination, transferMode: transferMode)
+                              destination: MediaDestination?) throws -> (MediaManifest, Data) {
+        try prepareMedia(jpeg, kind: "image/jpeg", width: width, height: height, destination: destination)
     }
     private func prepareMedia(_ data: Data, kind: String, width: Int, height: Int,
-                              destination: MediaDestination?,
-                              transferMode: MediaTransferMode) throws -> (MediaManifest, Data) {
+                              destination: MediaDestination?) throws -> (MediaManifest, Data) {
         let key = SymmetricKey(size: .bits256)
         let keyData = key.withUnsafeBytes { Data($0) }
         let manifest = MediaManifest(byteCount: data.count, width: width, height: height,
                                      sha256: Data(SHA256.hash(data: data)), fileKey: keyData,
-                                     destination: destination, kind: kind, transferMode: transferMode)
+                                     destination: destination, kind: kind)
         try manifest.validate()
         guard let sealed = try AES.GCM.seal(data, using: key).combined else { throw SpaceError.invalidEnvelope }
         return (manifest, sealed)
@@ -154,7 +147,6 @@ public actor SyncCoordinator {
     @discardableResult public func createWithPhoto(_ payload: EventPayload, jpeg: Data,
                                                      width: Int, height: Int, objectID: UUID,
                                                      destination: MediaDestination,
-                                                     transferMode: MediaTransferMode = .direct,
                                                      now: Date = Date()) throws -> DomainEvent {
         switch (payload, destination) {
         case (.journal(.memory(let memory)), .memory) where memory.mediaID == objectID: break
@@ -163,7 +155,7 @@ public actor SyncCoordinator {
         default: throw SpaceError.invalidInput
         }
         let (manifest, sealed) = try preparePhoto(jpeg, width: width, height: height,
-                                                   destination: destination, transferMode: transferMode)
+                                                   destination: destination)
         return try db.transaction {
             guard try db.read("mediaBlobs", key: objectID.uuidString) == nil else { throw SpaceError.conflict }
             try db.write("mediaBlobs", key: objectID.uuidString, value: sealed)
@@ -171,29 +163,23 @@ public actor SyncCoordinator {
             return try createInTransaction(payload, objectID: objectID, now: now)
         }
     }
-    public func sealCapsuleDraft(_ draft: CapsuleDraft,
-                                 transferMode: MediaTransferMode = .direct,
-                                 now: Date = Date()) throws {
+    public func sealCapsuleDraft(_ draft: CapsuleDraft, now: Date = Date()) throws {
         try draft.validate()
         let payload = EventPayload.journal(.sealCapsule(draft.content))
         if let jpeg = draft.photoJPEG, let width = draft.photoWidth, let height = draft.photoHeight {
             _ = try createWithPhoto(payload, jpeg: jpeg, width: width, height: height,
-                                    objectID: draft.id, destination: .capsule,
-                                    transferMode: transferMode, now: now)
+                                    objectID: draft.id, destination: .capsule, now: now)
         } else {
             _ = try create(payload, objectID: draft.id, now: now)
         }
     }
     public func updateProfile(name: String, avatar: (jpeg: Data, width: Int, height: Int)? = nil,
-                              retainedAvatarID: UUID? = nil,
-                              transferMode: MediaTransferMode = .direct,
-                              now: Date = Date()) throws {
+                              retainedAvatarID: UUID? = nil, now: Date = Date()) throws {
         if let avatar {
             let id = UUID()
             _ = try createWithPhoto(.profile(ProfileContent(name: name, avatarID: id)),
                                     jpeg: avatar.jpeg, width: avatar.width, height: avatar.height,
-                                    objectID: id, destination: .avatar,
-                                    transferMode: transferMode, now: now)
+                                    objectID: id, destination: .avatar, now: now)
         } else {
             if let retainedAvatarID {
                 guard let asset = try state().media[retainedAvatarID], asset.author == pair.localID,
@@ -207,37 +193,9 @@ public actor SyncCoordinator {
         guard let asset = try state().media[id], asset.author == pair.localID else { return nil }
         return try db.read("mediaBlobs", key: id.uuidString)
     }
-    public func stableMediaForUpload() throws -> [(id: UUID, ciphertext: Data)] {
-        try state().media.values.compactMap { asset in
-            guard asset.author == pair.localID,
-                  asset.manifest.effectiveTransferMode == .relayStore,
-                  try db.read("mediaUploaded", key: asset.id.uuidString) == nil,
-                  let ciphertext = try db.read("mediaBlobs", key: asset.id.uuidString) else { return nil }
-            return (asset.id, ciphertext)
-        }
-    }
-    public func markStableMediaUploaded(_ id: UUID) throws {
-        guard let asset = try state().media[id], asset.author == pair.localID,
-              asset.manifest.effectiveTransferMode == .relayStore else { throw SpaceError.unauthorized }
-        try db.transaction {
-            try db.write("mediaUploaded", key: id.uuidString, value: Data([1]))
-        }
-    }
-    public func mediaTransferMode(_ id: UUID) throws -> MediaTransferMode? {
-        try state().media[id]?.manifest.effectiveTransferMode
-    }
     public func missingPeerPhotoIDs() throws -> [UUID] {
         try state().media.values.compactMap { asset in
             guard asset.author == pair.peerID, asset.manifest.kind.hasPrefix("image/"),
-                  asset.manifest.effectiveTransferMode == .direct,
-                  try db.read("mediaBlobs", key: asset.id.uuidString) == nil else { return nil }
-            return asset.id
-        }
-    }
-    public func missingStablePeerMediaIDs() throws -> [UUID] {
-        try state().media.values.compactMap { asset in
-            guard asset.author == pair.peerID,
-                  asset.manifest.effectiveTransferMode == .relayStore,
                   try db.read("mediaBlobs", key: asset.id.uuidString) == nil else { return nil }
             return asset.id
         }
@@ -318,9 +276,6 @@ public actor SyncCoordinator {
     public func encryptPending() throws {
         for (key, bytes) in try db.entries("pending") {
             let event = try JSONDecoder().decode(DomainEvent.self, from: bytes)
-            if case .media(let manifest) = event.payload,
-               manifest.effectiveTransferMode == .relayStore,
-               try db.read("mediaUploaded", key: event.objectID.uuidString) == nil { continue }
             try db.transaction {
                 _ = try enqueue(.event(event), eventID: event.id)
                 try db.remove("pending", key: key)

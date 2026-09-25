@@ -33,7 +33,7 @@ public actor HTTPRelay: RelayTransport {
         self.key = try P256.Signing.PrivateKey(rawRepresentation: authKey)
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 10
-        config.timeoutIntervalForResource = 60
+        config.timeoutIntervalForResource = 20
         self.session = URLSession(configuration: config, delegate: NoRelayRedirects(), delegateQueue: nil)
     }
     public static func encode<T: Encodable>(_ value: T) throws -> Data {
@@ -87,44 +87,6 @@ public actor HTTPRelay: RelayTransport {
         task.maximumMessageSize = 2_001_000
         task.resume()
         return task
-    }
-    private func mediaRequest(_ id: UUID, method: String, body: Data = Data()) async throws -> Data {
-        struct Challenge: Decodable { let nonce: String; let epoch: UInt64 }
-        let challengeBytes = try await request("/v1/auth/challenges",
-                                               body: Self.encode(["deviceID": deviceID.uuidString]),
-                                               authenticated: false)
-        let challenge = try JSONDecoder().decode(Challenge.self, from: challengeBytes)
-        guard challenge.epoch == epoch else { throw RelayEpochChanged() }
-        let path = "/v1/media/" + id.uuidString
-        let hash = SHA256.hash(data: body).map { String(format: "%02x", $0) }.joined()
-        let canonical: [Any] = ["couple-api-v1", challenge.nonce, method, path, hash, epoch, deviceID.uuidString]
-        let signed = try JSONSerialization.data(withJSONObject: canonical, options: [.withoutEscapingSlashes])
-        var media = URLRequest(url: URL(string: path, relativeTo: baseURL)!.absoluteURL)
-        media.httpMethod = method
-        if method == "PUT" {
-            media.httpBody = body
-            media.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
-        }
-        media.setValue(deviceID.uuidString, forHTTPHeaderField: "X-Device-ID")
-        media.setValue(challenge.nonce, forHTTPHeaderField: "X-Challenge")
-        media.setValue(try key.signature(for: signed).rawRepresentation.base64EncodedString(),
-                       forHTTPHeaderField: "X-Signature")
-        let (data, response) = try await session.data(for: media)
-        guard let response = response as? HTTPURLResponse else { throw SpaceError.invalidEnvelope }
-        guard (200..<300).contains(response.statusCode) else { throw RelayHTTPError(status: response.statusCode) }
-        guard data.count <= 2_001_000 else { throw SpaceError.capacity }
-        return data
-    }
-    public func putMedia(_ id: UUID, ciphertext: Data) async throws {
-        guard ciphertext.count <= 2_000_128 else { throw SpaceError.capacity }
-        _ = try await mediaRequest(id, method: "PUT", body: ciphertext)
-    }
-    public func getMedia(_ id: UUID) async throws -> Data? {
-        do { return try await mediaRequest(id, method: "GET") }
-        catch let error as RelayHTTPError where error.status == 404 { return nil }
-    }
-    public func deleteMedia(_ id: UUID) async throws {
-        _ = try await mediaRequest(id, method: "DELETE")
     }
     public func put(_ envelope: Envelope, now: Date) async throws {
         try envelope.validate()

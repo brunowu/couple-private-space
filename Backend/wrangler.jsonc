@@ -4,7 +4,6 @@
   "compatibility_date": "2026-09-11",
   "compatibility_flags": ["nodejs_compat"],
   "durable_objects": { "bindings": [{ "name": "PAIR", "class_name": "PairObject" }] },
-  "r2_buckets": [{ "binding": "MEDIA", "bucket_name": "couple-private-media" }],
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["PairObject"] }],
   "observability": { "enabled": false }
 }

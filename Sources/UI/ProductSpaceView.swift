@@ -99,7 +99,7 @@ public struct ProductSpaceView: View {
     let hiddenChatIDs: Set<UUID>
     let deleteChatItem: (UUID, Bool) async throws -> Void
     let save: (EventPayload, UUID) async throws -> Void
-    let savePhoto: (Data, Int, Int, MediaTransferMode) async throws -> Void
+    let savePhoto: (Data, Int, Int) async throws -> Void
     let saveSticker: (Data, String, Int, Int) async throws -> Void
     let saveMemoryWithPhoto: (MemoryContent, Data, Int, Int, UUID) async throws -> Void
     let loadPhoto: (UUID) async throws -> Data?
@@ -158,9 +158,6 @@ public struct ProductSpaceView: View {
     @State private var tab = 0
     @State private var draft = ""
     @State private var selectedChatPhotos: [PhotosPickerItem] = []
-    @State private var pendingChatPhotos: [PhotosPickerItem] = []
-    @State private var pendingCapturedPhoto: Data?
-    @State private var showingPhotoModeChoice = false
     @State private var showingChatCamera = false
     @State private var showingStickerLibrary = false
     @StateObject private var stickerLibrary = StickerLibrary()
@@ -209,7 +206,7 @@ public struct ProductSpaceView: View {
                 photoRefresh: Date?,
                 save: @escaping (EventPayload, UUID) async throws -> Void,
                 privateCycle: CycleEntry?, cycle: @escaping (CycleEntry) async throws -> Void,
-                savePhoto: @escaping (Data, Int, Int, MediaTransferMode) async throws -> Void,
+                savePhoto: @escaping (Data, Int, Int) async throws -> Void,
                 saveSticker: @escaping (Data, String, Int, Int) async throws -> Void,
                 saveMemoryWithPhoto: @escaping (MemoryContent, Data, Int, Int, UUID) async throws -> Void,
                 loadPhoto: @escaping (UUID) async throws -> Data?,
@@ -295,20 +292,47 @@ public struct ProductSpaceView: View {
                 .tabItem { Label("对话", systemImage: "bubble.left.and.bubble.right") }
                 .badge(unreadCount).tag(0)
             NavigationStack { wishes.navigationTitle("小小愿望").toolbar {
-                ToolbarItem(placement: .topBarTrailing) { wishAddButton }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { composing = wishSection == 0 ? .wish : .checklist(nil, category) } label: { Image(systemName: "plus") }
+                        .accessibilityLabel(wishSection == 0 ? "创建愿望" : "添加清单")
+                }
             } }.tabItem { Label("愿望", systemImage: "star") }.tag(1)
             NavigationStack { memories.navigationTitle("我们的回忆").toolbar {
-                ToolbarItem(placement: .topBarTrailing) { memoryAddButton }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button {
+                        if memorySection == 0 { composing = .memory(nil) }
+                        else { editingCapsule = CapsuleDraft() }
+                    } label: { Image(systemName: "plus") }
+                        .accessibilityLabel(memorySection == 0 ? "添加回忆" : "创建时间胶囊")
+                }
             } }.tabItem { Label("回忆", systemImage: "photo.on.rectangle") }.tag(2)
             NavigationStack { together.navigationTitle("我们").navigationBarTitleDisplayMode(.inline) }
                 .tabItem { Label("我们", systemImage: "person.2") }.tag(3)
         }.tint(SpaceStyle.accent)
         .onChange(of: tab) { _, selected in
-            handleTabChange(selected)
+            chatFocused = false
+            if selected == 0 {
+                markChatRead()
+                Task { await clearRemoteNotifications(for: .message) }
+            }
+            if selected == 1 { Task { await clearRemoteNotifications(for: .wish) } }
         }
         .toolbarBackground(SpaceStyle.paper, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
-        .overlay(alignment: .top) { affectionBanner }
+        .overlay(alignment: .top) {
+            if let affection {
+                HStack(spacing: 12) {
+                    Image(systemName: affection.kind.symbol).font(.title2).foregroundStyle(SpaceStyle.accent)
+                    ProfileAvatar(name: peerName, photoID: peerAvatarID,
+                                  load: loadPhoto, refresh: photoRefresh, size: 34)
+                    Text(affectionText(affection.kind))
+                        .font(.subheadline).accessibilityIdentifier("affection-received")
+                    Spacer(minLength: 0)
+                    Button("回应") { sendFeeling(affection.kind) }.font(.subheadline).tint(SpaceStyle.accent)
+                }.padding(16).background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20)).padding(.horizontal, 16)
+                    .transition(.opacity)
+            }
+        }
         .animation(reduceMotion ? nil : .easeInOut(duration: 0.25), value: affection?.id)
         .sensoryFeedback(.impact(weight: .light), trigger: affection?.id) { _, next in affectionHaptics && next != nil }
         .sheet(item: $composing) { item in
@@ -345,10 +369,8 @@ public struct ProductSpaceView: View {
         .fullScreenCover(item: $photoPreview) { preview in
             PhotoViewer(preview: preview, load: loadPhoto)
         }
-        .sheet(isPresented: $showingChatCamera, onDismiss: {
-            if pendingCapturedPhoto != nil { showingPhotoModeChoice = true }
-        }) {
-            CameraPicker { data in pendingCapturedPhoto = data }
+        .sheet(isPresented: $showingChatCamera) {
+            CameraPicker { data in Task { await sendCapturedPhoto(data) } }
         }
         .sheet(isPresented: $showingStickerLibrary) {
             StickerLibraryView(library: stickerLibrary) { sticker in
@@ -359,10 +381,13 @@ public struct ProductSpaceView: View {
             ProfileEditor(profile: state.profiles[localID]?.value, loadPhoto: loadPhoto, save: updateProfile)
         }
         .task(id: notificationDestination?.id) {
-            await handleNotificationDestination()
+            guard let destination = notificationDestination else { return }
+            // Keep a pending destination while a private editor is open; never discard unsaved input.
+            if editingCapsule != nil || composing != nil { return }
+            await route(destination)
         }
         .onChange(of: editingCapsule == nil && composing == nil) { _, closed in
-            handleEditorClosed(closed)
+            if closed, let destination = notificationDestination { Task { await route(destination) } }
         }
         .sheet(isPresented: Binding(get: { selectedWish != nil }, set: { if !$0 { selectedWish = nil } })) {
             selectedWishSheet
@@ -389,17 +414,7 @@ public struct ProductSpaceView: View {
             Text("解除后双方都不能再用这段配对同步。两台设备上已经保存的内容不会自动删除，也无法远程抹去伴侣的副本。")
         }
         .onChange(of: selectedChatPhotos) { _, photos in
-            if !photos.isEmpty {
-                pendingChatPhotos = photos
-                showingPhotoModeChoice = true
-            }
-        }
-        .confirmationDialog("选择照片发送方式", isPresented: $showingPhotoModeChoice, titleVisibility: .visible) {
-            Button("稳定传输") { Task { await sendPendingPhotos(.relayStore) } }
-            Button("私密直传") { Task { await sendPendingPhotos(.direct) } }
-            Button("取消", role: .cancel) { clearPendingPhotos() }
-        } message: {
-            Text("稳定传输会临时保存本地加密后的密文，对方稍后也能收到。私密直传不上传媒体，需要两台设备同时在线。")
+            if !photos.isEmpty { Task { await sendSelectedPhotos(photos) } }
         }
         .fileImporter(isPresented: $showingBackupImporter, allowedContentTypes: [.data]) { result in
             switch result {
@@ -410,89 +425,21 @@ public struct ProductSpaceView: View {
             case .failure(let error): failure = error.localizedDescription
             }
         }
-        .onChange(of: chatLatestClock) { _, _ in handleChatClockChange() }
-        .onAppear { handleAppear() }
-        .tint(SpaceStyle.accent)
-    }
-
-    private var memoryAddButton: some View {
-        Button {
-            if memorySection == 0 { composing = .memory(nil) }
-            else { editingCapsule = CapsuleDraft() }
-        } label: {
-            Image(systemName: "plus")
-        }
-        .accessibilityLabel(memorySection == 0 ? "添加回忆" : "创建时间胶囊")
-    }
-
-    @ViewBuilder private var affectionBanner: some View {
-        if let affection {
-            HStack(spacing: 12) {
-                Image(systemName: affection.kind.symbol).font(.title2).foregroundStyle(SpaceStyle.accent)
-                ProfileAvatar(name: peerName, photoID: peerAvatarID,
-                              load: loadPhoto, refresh: photoRefresh, size: 34)
-                Text(affectionText(affection.kind))
-                    .font(.subheadline).accessibilityIdentifier("affection-received")
-                Spacer(minLength: 0)
-                Button("回应") { sendFeeling(affection.kind) }.font(.subheadline).tint(SpaceStyle.accent)
+        .onChange(of: chatLatestClock) { _, _ in if tab == 0 { markChatRead() } }
+        .onAppear {
+            if !chatReadClockInitialized {
+                chatLastReadClock = chatLatestClock; chatReadClockInitialized = true
+            } else if tab == 0 { markChatRead() }
+            #if DEBUG && targetEnvironment(simulator)
+            if !stickerSmokeStarted,
+               let index = ProcessInfo.processInfo.arguments.firstIndex(of: "--sticker-import-smoke"),
+               ProcessInfo.processInfo.arguments.indices.contains(index + 1) {
+                stickerSmokeStarted = true
+                stickerLibrary.importPack(URL(fileURLWithPath: ProcessInfo.processInfo.arguments[index + 1]))
             }
-            .padding(16)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20))
-            .padding(.horizontal, 16)
-            .transition(.opacity)
+            #endif
         }
-    }
-
-    private func handleTabChange(_ selected: Int) {
-        chatFocused = false
-        if selected == 0 {
-            markChatRead()
-            Task { await clearRemoteNotifications(for: .message) }
-        } else if selected == 1 {
-            Task { await clearRemoteNotifications(for: .wish) }
-        }
-    }
-
-    private func handleNotificationDestination() async {
-        guard let destination = notificationDestination,
-              editingCapsule == nil, composing == nil else { return }
-        await route(destination)
-    }
-
-    private func handleEditorClosed(_ closed: Bool) {
-        guard closed, let destination = notificationDestination else { return }
-        Task { await route(destination) }
-    }
-
-    private func handleChatClockChange() {
-        if tab == 0 { markChatRead() }
-    }
-
-    private func handleAppear() {
-        if !chatReadClockInitialized {
-            chatLastReadClock = chatLatestClock
-            chatReadClockInitialized = true
-        } else if tab == 0 {
-            markChatRead()
-        }
-        #if DEBUG && targetEnvironment(simulator)
-        if !stickerSmokeStarted,
-           let index = ProcessInfo.processInfo.arguments.firstIndex(of: "--sticker-import-smoke"),
-           ProcessInfo.processInfo.arguments.indices.contains(index + 1) {
-            stickerSmokeStarted = true
-            stickerLibrary.importPack(URL(fileURLWithPath: ProcessInfo.processInfo.arguments[index + 1]))
-        }
-        #endif
-    }
-
-    private var wishAddButton: some View {
-        Button {
-            if wishSection == 0 { composing = .wish }
-            else { composing = .checklist(nil, category) }
-        } label: {
-            Image(systemName: "plus")
-        }
-        .accessibilityLabel(wishSection == 0 ? "创建愿望" : "添加清单")
+        .tint(SpaceStyle.accent)
     }
 
     @ViewBuilder private var selectedWishSheet: some View {
@@ -797,26 +744,14 @@ public struct ProductSpaceView: View {
         }
     }
 
-    private func clearPendingPhotos() {
-        pendingChatPhotos = []
-        pendingCapturedPhoto = nil
-        selectedChatPhotos = []
-    }
-    private func sendPendingPhotos(_ mode: MediaTransferMode) async {
-        let selections = pendingChatPhotos
-        let capture = pendingCapturedPhoto
-        clearPendingPhotos()
-        if !selections.isEmpty { await sendSelectedPhotos(selections, mode: mode) }
-        if let capture { await sendCapturedPhoto(capture, mode: mode) }
-    }
-    private func sendSelectedPhotos(_ selections: [PhotosPickerItem], mode: MediaTransferMode) async {
+    private func sendSelectedPhotos(_ selections: [PhotosPickerItem]) async {
         photoSending = true
         defer { photoSending = false; selectedChatPhotos = [] }
         for selection in selections {
             do {
                 guard let bytes = try await selection.loadTransferable(type: Data.self) else { throw SpaceError.invalidInput }
                 let photo = try PhotoImport.prepare(bytes)
-                try await savePhoto(photo.jpeg, photo.width, photo.height, mode)
+                try await savePhoto(photo.jpeg, photo.width, photo.height)
             } catch {
                 failure = error as? SpaceError == .capacity
                     ? "其中一张照片处理后仍超过 2 MB，其他可读取照片已继续发送。"
@@ -824,12 +759,12 @@ public struct ProductSpaceView: View {
             }
         }
     }
-    private func sendCapturedPhoto(_ bytes: Data, mode: MediaTransferMode) async {
+    private func sendCapturedPhoto(_ bytes: Data) async {
         photoSending = true
         defer { photoSending = false }
         do {
             let photo = try PhotoImport.prepare(bytes)
-            try await savePhoto(photo.jpeg, photo.width, photo.height, mode)
+            try await savePhoto(photo.jpeg, photo.width, photo.height)
         } catch {
             failure = error as? SpaceError == .capacity ? "照片处理后仍超过 2 MB，请重试。" : "无法使用这张照片，请重试。"
         }

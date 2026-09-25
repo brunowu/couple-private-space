@@ -137,13 +137,6 @@ public enum MediaDestination: String, Codable, Equatable, Sendable {
     case chat, memory, capsule, avatar
 }
 
-public enum MediaTransferMode: String, Codable, CaseIterable, Equatable, Sendable {
-    /// Encrypted bytes are held briefly in durable object storage until the peer downloads them.
-    case relayStore
-    /// Encrypted bytes use only the live relay socket and are never written to object storage.
-    case direct
-}
-
 public struct ProfileContent: Codable, Equatable, Sendable {
     public let name: String
     public let avatarID: UUID?
@@ -174,16 +167,12 @@ public struct MediaManifest: Codable, Equatable, Sendable {
     public let fileKey: Data
     /// Nil is a legacy chat photo. New attachments name their owning surface.
     public let destination: MediaDestination?
-    /// Nil identifies media created before selectable transfer modes; it remains live-direct.
-    public let transferMode: MediaTransferMode?
     public init(byteCount: Int, width: Int, height: Int, sha256: Data, fileKey: Data,
-                destination: MediaDestination? = nil, kind: String = "image/jpeg",
-                transferMode: MediaTransferMode? = nil) {
+                destination: MediaDestination? = nil, kind: String = "image/jpeg") {
         self.kind = kind; self.byteCount = byteCount
         self.width = width; self.height = height; self.sha256 = sha256; self.fileKey = fileKey
-        self.destination = destination; self.transferMode = transferMode
+        self.destination = destination
     }
-    public var effectiveTransferMode: MediaTransferMode { transferMode ?? .direct }
     public func validate() throws {
         let maximum = kind == "image/jpeg" ? 2_000_000 : 10 * 1024 * 1024
         guard ["image/jpeg", "image/png", "image/gif"].contains(kind),
@@ -221,7 +210,7 @@ public struct DomainEvent: Codable, Equatable, Sendable {
         self.id = id; self.objectID = objectID; self.author = author
         self.sequence = sequence; self.lamport = lamport; self.createdAt = createdAt
         self.payload = payload
-        if case .media(let manifest) = payload { self.schemaVersion = manifest.transferMode == nil ? (manifest.destination == .avatar ? 7 : manifest.destination == nil ? 5 : 6) : 10
+        if case .media(let manifest) = payload { self.schemaVersion = manifest.destination == .avatar ? 7 : manifest.destination == nil ? 5 : 6
         } else if case .profile = payload { self.schemaVersion = 7
         } else if case .journal(.memory(let memory)) = payload, memory.mediaID != nil { self.schemaVersion = 6
         } else if case .journal(.sealCapsule(let capsule)) = payload, capsule.mediaID != nil { self.schemaVersion = 6
@@ -237,7 +226,7 @@ public struct DomainEvent: Codable, Equatable, Sendable {
     }
     public var version: Version { Version(clock: lamport, author: author, event: id) }
     public func validate(cycleOwner: UUID?) throws {
-        guard (1...10).contains(schemaVersion) else { throw SpaceError.unsupportedVersion }
+        guard (1...9).contains(schemaVersion) else { throw SpaceError.unsupportedVersion }
         guard sequence > 0, lamport > 0, lamport < UInt64.max, sequence < UInt64.max,
               createdAt.timeIntervalSince1970.isFinite else { throw SpaceError.invalidInput }
         switch payload {
@@ -245,7 +234,6 @@ public struct DomainEvent: Codable, Equatable, Sendable {
             guard schemaVersion >= 5 else { throw SpaceError.unsupportedVersion }
             if manifest.destination != nil { guard schemaVersion >= 6 else { throw SpaceError.unsupportedVersion } }
             if manifest.destination == .avatar { guard schemaVersion >= 7 else { throw SpaceError.unsupportedVersion } }
-            if manifest.transferMode != nil { guard schemaVersion >= 10 else { throw SpaceError.unsupportedVersion } }
             try manifest.validate()
         case .profile(let profile):
             guard schemaVersion >= 7, profile.avatarID == nil || profile.avatarID == objectID else { throw SpaceError.invalidInput }
