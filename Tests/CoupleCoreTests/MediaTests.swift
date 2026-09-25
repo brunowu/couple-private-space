@@ -6,6 +6,21 @@ import Crypto
 import Persistence
 import Sync
 
+@Test func stablePhotoWaitsForUploadWithoutBlockingMessages() async throws {
+    let c = try Clients(); defer { try? FileManager.default.removeItem(at: c.dir) }
+    let photo = try await c.a.createPhoto(Data([1, 2, 3]), width: 1, height: 1,
+                                          transferMode: .relayStore)
+    _ = try await c.a.create(.message(text: "still sends"))
+
+    try await c.a.encryptPending()
+    #expect(try c.dbA.entries("outbox").count == 1)
+    #expect(try await c.a.stableMediaForUpload().map(\.id) == [photo.id])
+
+    try await c.a.markStableMediaUploaded(photo.id)
+    try await c.a.encryptPending()
+    #expect(try c.dbA.entries("outbox").count == 2)
+}
+
 @Test func photoMetadataNeverCountsAsDeliveryBeforeAuthenticatedBytesArrive() async throws {
     let c = try Clients(); defer { try? FileManager.default.removeItem(at: c.dir) }
     let bitmap = try #require(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,

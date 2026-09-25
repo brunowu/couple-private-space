@@ -3,6 +3,7 @@ import { sendPush, type PushJob } from './apns';
 
 export interface Env {
   PAIR: DurableObjectNamespace<PairObject>;
+  MEDIA: R2Bucket;
   BOOTSTRAP_TOKEN?: string;
   APNS_TEAM_ID?: string; APNS_KEY_ID?: string; APNS_PRIVATE_KEY?: string; APNS_TOPIC?: string;
 }
@@ -15,6 +16,7 @@ class HTTPError extends Error { constructor(readonly status: number) { super('re
 const json = (value: unknown, status = 200) => Response.json(value, { status, headers: { 'Cache-Control': 'no-store' } });
 const hex = (buffer: ArrayBuffer) => Array.from(new Uint8Array(buffer), b => b.toString(16).padStart(2, '0')).join('');
 const digest = async (s: string) => hex(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s)));
+const digestBytes = async (bytes: ArrayBuffer | Uint8Array) => hex(await crypto.subtle.digest('SHA-256', bytes));
 const b64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 const unb64 = (s: string) => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 const randomToken = () => b64(crypto.getRandomValues(new Uint8Array(32))).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
@@ -26,6 +28,17 @@ async function readBody(request: Request): Promise<string> {
     if (size > MAX_BODY) { await reader.cancel(); throw new HTTPError(413); } chunks.push(part.value); }
   const bytes = new Uint8Array(size); let offset = 0; for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
   return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+}
+async function readMediaBody(request: Request): Promise<Uint8Array> {
+  if (Number(request.headers.get('content-length') ?? 0) > 2_000_128) throw new HTTPError(413);
+  if (!request.body) throw new HTTPError(400);
+  const reader = request.body.getReader(); let size = 0; const chunks: Uint8Array[] = [];
+  while (true) { const part = await reader.read(); if (part.done) break; size += part.value.byteLength;
+    if (size > 2_000_128) { await reader.cancel(); throw new HTTPError(413); } chunks.push(part.value); }
+  if (!size) throw new HTTPError(400);
+  const bytes = new Uint8Array(size); let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.length; }
+  return bytes;
 }
 function deviceInput(value: any): Device {
   if (!value || !UUID.test(value.deviceID) || typeof value.identityPublic !== 'string' || value.identityPublic.length > 256 || value.identityPublic.length < 32) throw new HTTPError(400);
@@ -41,14 +54,14 @@ export class PairObject extends DurableObject<Env> {
     ctx.storage.sql.exec('CREATE TABLE IF NOT EXISTS challenges (nonce TEXT PRIMARY KEY, device TEXT NOT NULL, expires INTEGER NOT NULL)');
   }
   private async pair(): Promise<Pair> { const p = await this.ctx.storage.get<Pair>('pair'); if (!p) throw new HTTPError(403); return p; }
-  private async authenticate(request: Request, body: string, pair: Pair): Promise<Device> {
+  private async authenticate(request: Request, bodyDigest: string, pair: Pair): Promise<Device> {
     const deviceID = request.headers.get('x-device-id') ?? '', nonce = request.headers.get('x-challenge') ?? '', signature = request.headers.get('x-signature') ?? '';
     if (nonce.length > 64 || signature.length > 128) throw new HTTPError(401);
     const device = pair.devices.find(d => d.deviceID === deviceID);
     const rows = this.ctx.storage.sql.exec<{ device: string; expires: number }>('SELECT device,expires FROM challenges WHERE nonce=?', nonce).toArray();
     if (!device || rows.length !== 1 || rows[0].device !== deviceID || rows[0].expires <= Date.now()) throw new HTTPError(401);
     const url = new URL(request.url);
-    const canonical = JSON.stringify(['couple-api-v1', nonce, request.method, url.pathname + url.search, await digest(body), pair.epoch, deviceID]);
+    const canonical = JSON.stringify(['couple-api-v1', nonce, request.method, url.pathname + url.search, bodyDigest, pair.epoch, deviceID]);
     const key = await crypto.subtle.importKey('jwk', device.authPublicJwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['verify']);
     let valid = false;
     try { valid = await crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, key, unb64(signature), new TextEncoder().encode(canonical)); } catch {}
@@ -65,7 +78,10 @@ export class PairObject extends DurableObject<Env> {
     });
   }
   private async route(request: Request): Promise<Response> {
-    const path = new URL(request.url).pathname, body = await readBody(request);
+    const path = new URL(request.url).pathname;
+    const mediaMatch = path.match(/^\/v1\/media\/([0-9a-f-]{36})$/i);
+    if (mediaMatch && UUID.test(mediaMatch[1])) return this.media(request, mediaMatch[1]);
+    const body = await readBody(request);
     const input = body ? JSON.parse(body) : {};
     if (path === '/v1/bootstrap' && request.method === 'POST') {
       if (!this.env.BOOTSTRAP_TOKEN || await digest(request.headers.get('authorization') ?? '') !== await digest('Bearer ' + this.env.BOOTSTRAP_TOKEN)) throw new HTTPError(401);
@@ -105,7 +121,7 @@ export class PairObject extends DurableObject<Env> {
       this.ctx.storage.sql.exec('INSERT INTO challenges VALUES(?,?,?)', nonce, input.deviceID, expires);
       await this.schedule(); return json({ nonce, expires, epoch: pair.epoch });
     }
-    const device = await this.authenticate(request, body, pair);
+    const device = await this.authenticate(request, await digest(body), pair);
     if (path === '/v1/pair/status' && request.method === 'GET') {
       return json({ pairID: pair.pairID, epoch: pair.epoch, active: pair.active,
         devices: pair.devices.map(({ deviceID, identityPublic, authPublicJwk }) => ({ deviceID, identityPublic, authPublicJwk })) });
@@ -134,6 +150,7 @@ export class PairObject extends DurableObject<Env> {
       });
       this.ctx.storage.sql.exec('DELETE FROM mailbox'); this.ctx.storage.sql.exec('DELETE FROM challenges');
       for (const socket of this.ctx.getWebSockets()) socket.close(1008, 'pair revoked');
+      await this.deleteMediaPrefix(pair.pairID);
       await this.ctx.storage.delete('pushJobs'); return json({ revoked: true });
     }
     if (!pair.active) throw new HTTPError(403);
@@ -214,6 +231,41 @@ export class PairObject extends DurableObject<Env> {
       return json({ removed: true });
     }
     throw new HTTPError(404);
+  }
+  private mediaKey(pair: Pair, id: string) { return `${pair.pairID}/${pair.epoch}/${id}`; }
+  private async media(request: Request, id: string): Promise<Response> {
+    const pair = await this.pair();
+    if (!pair.active) throw new HTTPError(403);
+    const bytes = request.method === 'PUT' ? await readMediaBody(request) : new Uint8Array();
+    const device = await this.authenticate(request, await digestBytes(bytes), pair);
+    const key = this.mediaKey(pair, id);
+    if (request.method === 'PUT') {
+      if (request.headers.get('content-type') !== 'application/octet-stream') throw new HTTPError(415);
+      const checksum = await digestBytes(bytes);
+      const old = await this.env.MEDIA.head(key);
+      if (old) {
+        if (old.customMetadata?.uploader !== device.deviceID || old.customMetadata?.checksum !== checksum) throw new HTTPError(409);
+        return json({ accepted: true, byteCount: old.size });
+      }
+      const recipient = pair.devices.find(d => d.deviceID !== device.deviceID)!;
+      await this.env.MEDIA.put(key, bytes, { httpMetadata: { contentType: 'application/octet-stream' },
+        customMetadata: { uploader: device.deviceID, recipient: recipient.deviceID, checksum, createdAt: String(Date.now()) } });
+      return json({ accepted: true, byteCount: bytes.byteLength }, 201);
+    }
+    const object = await this.env.MEDIA.get(key);
+    if (!object) throw new HTTPError(404);
+    if (![object.customMetadata?.uploader, object.customMetadata?.recipient].includes(device.deviceID)) throw new HTTPError(403);
+    if (request.method === 'GET') return new Response(object.body, { headers: { 'Content-Type': 'application/octet-stream', 'Cache-Control': 'no-store' } });
+    if (request.method === 'DELETE') { await this.env.MEDIA.delete(key); return json({ removed: true }); }
+    throw new HTTPError(405);
+  }
+  private async deleteMediaPrefix(pairID: string) {
+    let cursor: string | undefined;
+    do {
+      const page = await this.env.MEDIA.list({ prefix: `${pairID}/`, cursor, limit: 1000 });
+      if (page.objects.length) await this.env.MEDIA.delete(page.objects.map(o => o.key));
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
   }
   async webSocketMessage(socket: WebSocket, message: string | ArrayBuffer) {
     const source = socket.deserializeAttachment() as { deviceID?: string; epoch?: number } | null;

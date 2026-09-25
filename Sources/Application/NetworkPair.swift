@@ -334,9 +334,25 @@ public actor NetworkPair {
     public func synchronize() async throws {
         try await checkPairStatus()
         let client = try client()
+        // Failed stable-media uploads remain pending without blocking ordinary messages.
+        for item in try await client.stableMediaForUpload() {
+            do {
+                try await relay!.putMedia(item.id, ciphertext: item.ciphertext)
+                try await client.markStableMediaUploaded(item.id)
+            } catch { continue }
+        }
         try await client.sync(using: relay!)
-        // The mailbox carries only the signed manifest. The photo bytes pass through
-        // a live socket and are never added to the server's durable storage.
+        var receivedStableMedia = false
+        for id in try await client.missingStablePeerMediaIDs() {
+            do {
+                guard let ciphertext = try await relay!.getMedia(id) else { continue }
+                try await client.receivePhotoCiphertext(ciphertext, id: id)
+                try? await relay!.deleteMedia(id)
+                receivedStableMedia = true
+            } catch { continue }
+        }
+        if receivedStableMedia { try await client.sync(using: relay!) }
+        // Private direct media uses only the live socket and is never put in R2.
         do {
             try await ensureMediaSocket()
             for id in try await client.missingPeerPhotoIDs() {
@@ -392,7 +408,9 @@ public actor NetworkPair {
     public func saveCycle(_ entry: CycleEntry) async throws { try await client().saveCycle(entry) }
     public func capsuleDrafts() async throws -> [CapsuleDraft] { try await client().capsuleDrafts() }
     public func saveCapsuleDraft(_ value: CapsuleDraft) async throws { try await client().saveCapsuleDraft(value) }
-    public func sealCapsuleDraft(_ value: CapsuleDraft) async throws { try await client().sealCapsuleDraft(value) }
+    public func sealCapsuleDraft(_ value: CapsuleDraft) async throws {
+        try await client().sealCapsuleDraft(value, transferMode: .relayStore)
+    }
     public func discardCapsuleDraft(_ id: UUID) async throws { try await client().discardCapsuleDraft(id) }
     public func prepareCapsuleDraft(_ value: CapsuleDraft) async throws -> CapsuleDraft { try await client().prepareCapsuleDraft(value) }
     public func openedCapsules() async throws -> Set<UUID> { try await client().openedCapsules() }
@@ -401,23 +419,28 @@ public actor NetworkPair {
     public func createEvent(_ payload: EventPayload, objectID: UUID = UUID()) async throws { _ = try await client().create(payload, objectID: objectID) }
     public func hiddenChatIDs() async throws -> Set<UUID> { try await client().hiddenChatIDs() }
     public func deleteChatItem(_ id: UUID, forEveryone: Bool) async throws {
+        let mode = try await client().mediaTransferMode(id)
         try await client().deleteChatItem(id, forEveryone: forEveryone)
+        if mode == .relayStore { try? await relay?.deleteMedia(id) }
     }
-    public func createPhoto(_ jpeg: Data, width: Int, height: Int) async throws {
-        _ = try await client().createPhoto(jpeg, width: width, height: height)
+    public func createPhoto(_ jpeg: Data, width: Int, height: Int,
+                            transferMode: MediaTransferMode = .direct) async throws {
+        _ = try await client().createPhoto(jpeg, width: width, height: height, transferMode: transferMode)
     }
     public func createSticker(_ data: Data, kind: String, width: Int, height: Int) async throws {
-        _ = try await client().createSticker(data, kind: kind, width: width, height: height)
+        _ = try await client().createSticker(data, kind: kind, width: width, height: height, transferMode: .relayStore)
     }
     public func createMemoryWithPhoto(_ memory: MemoryContent, jpeg: Data,
                                       width: Int, height: Int, id: UUID) async throws {
         _ = try await client().createWithPhoto(.journal(.memory(memory)), jpeg: jpeg,
                                                width: width, height: height,
-                                               objectID: id, destination: .memory)
+                                               objectID: id, destination: .memory,
+                                               transferMode: .relayStore)
     }
     public func updateProfile(name: String, avatar: (jpeg: Data, width: Int, height: Int)?,
                               retainedAvatarID: UUID?) async throws {
-        try await client().updateProfile(name: name, avatar: avatar, retainedAvatarID: retainedAvatarID)
+        try await client().updateProfile(name: name, avatar: avatar, retainedAvatarID: retainedAvatarID,
+                                         transferMode: .relayStore)
     }
     public func photoData(_ id: UUID) async throws -> Data? { try await client().photoData(id) }
     public func pendingCount() async throws -> Int { try await client().unconfirmedEventCount() }
