@@ -102,7 +102,13 @@ def build_pack(folder: Path, output_dir: Path, category: str | None = None) -> P
     records, payloads = [], {}
     for media in sorted(folder.glob("*.gif")):
         data = media.read_bytes()
-        width, height = gif_size(data)
+        # A few upstream files use a .gif suffix for PNG data. The iPhone
+        # importer verifies magic bytes, so omit those malformed entries while
+        # retaining the rest of the pack instead of aborting the full build.
+        try:
+            width, height = gif_size(data)
+        except ValueError:
+            continue
         if not (0 < len(data) <= 10 * 1024 * 1024 and 0 < width <= 4096 and 0 < height <= 4096):
             continue
         digest = hashlib.sha256(data).hexdigest()
